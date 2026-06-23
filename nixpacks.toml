@@ -1,5 +1,8 @@
 
 # Nixpacks configuration for Railway deployment
+[providers.python]
+version = "3.11"
+
 [phases.setup]
 nixPkgs = ["...", "python311"]
 
@@ -13,3 +16,4 @@ dependsOn = ["install"]
 [start]
 cmd = "streamlit run app.py --server.port $PORT --server.address 0.0.0.0"
 dependsOn = ["build"]
+
