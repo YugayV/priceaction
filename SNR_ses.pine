@@ -1,0 +1,231 @@
+//@version=6
+indicator('Smart Money + Sessions', 'SMC + Sessions', overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+DATA = #DBDBDB
+HEADERS = #808080
+BACKGROUND = #161616
+BORDERS = #2E2E2E
+
+SESSIONS_GROUP = 'Sessions'
+sessionsShowInput = input.bool(true, 'Show Sessions Panel', group = SESSIONS_GROUP)
+sessionsTimezoneInput = input.string('Exchange', 'Timezone', group = SESSIONS_GROUP, options = ['Exchange', 'Etc/UTC', 'UTC', 'Europe/London', 'America/New_York', 'Asia/Tokyo', 'Asia/Hong_Kong', 'Asia/Singapore', 'Australia/Sydney'])
+
+asiaShowInput = input.bool(true, 'Asia', group = SESSIONS_GROUP, inline = 'SES1')
+asiaSessionInput = input.session('0000-0900', '', group = SESSIONS_GROUP, inline = 'SES1')
+asiaColorInput = input.color(color.rgb(0, 150, 136), '', group = SESSIONS_GROUP, inline = 'SES1')
+asiaNameInput = input.string('Asia', 'Asia Name', group = SESSIONS_GROUP)
+
+londonShowInput = input.bool(true, 'London', group = SESSIONS_GROUP, inline = 'SES2')
+londonSessionInput = input.session('0700-1600', '', group = SESSIONS_GROUP, inline = 'SES2')
+londonColorInput = input.color(color.rgb(33, 150, 243), '', group = SESSIONS_GROUP, inline = 'SES2')
+londonNameInput = input.string('London', 'London Name', group = SESSIONS_GROUP)
+
+nyShowInput = input.bool(true, 'New York', group = SESSIONS_GROUP, inline = 'SES3')
+nySessionInput = input.session('1200-2100', '', group = SESSIONS_GROUP, inline = 'SES3')
+nyColorInput = input.color(color.rgb(244, 67, 54), '', group = SESSIONS_GROUP, inline = 'SES3')
+nyNameInput = input.string('New York', 'New York Name', group = SESSIONS_GROUP)
+
+SMC_GROUP = 'Smart Money'
+smcShowInput = input.bool(true, 'Show SMC', group = SMC_GROUP)
+smcTimeframeInput = input.timeframe('60', 'SMC Timeframe', group = SMC_GROUP)
+smcPivotLenInput = input.int(5, 'Pivot Length', group = SMC_GROUP, minval = 1, maxval = 50)
+smcSwingSourceInput = input.string('Wick', 'Swing Source', group = SMC_GROUP, options = ['Wick', 'Body'])
+smcMaxLabelsInput = input.int(200, 'Max Labels', group = SMC_GROUP, minval = 10, maxval = 500)
+smcLabelSizeInput = input.string('Tiny', 'Label Size', group = SMC_GROUP, options = ['Tiny', 'Small', 'Normal'])
+
+smcShowBosInput = input.bool(true, 'Show BOS', group = SMC_GROUP)
+smcShowChochInput = input.bool(true, 'Show CHoCH', group = SMC_GROUP)
+smcShowEventLinesInput = input.bool(true, 'Show BOS/CHoCH Lines', group = SMC_GROUP)
+smcEventLineBarsInput = input.int(200, 'Line Length (bars)', group = SMC_GROUP, minval = 10, maxval = 2000)
+smcMaxEventLinesInput = input.int(50, 'Max Event Lines', group = SMC_GROUP, minval = 0, maxval = 300)
+
+lqShowInput = input.bool(true, 'Liquidity Sweeps', group = SMC_GROUP)
+lqModeInput = input.string('CloseBack', 'Sweep Confirm', group = SMC_GROUP, options = ['CloseBack', 'Wick'])
+
+smcBullColorInput = input.color(color.rgb(0, 200, 83), 'Bull Color', group = SMC_GROUP)
+smcBearColorInput = input.color(color.rgb(255, 82, 82), 'Bear Color', group = SMC_GROUP)
+smcNeutralColorInput = input.color(color.rgb(158, 158, 158), 'Neutral Color', group = SMC_GROUP)
+smcCandleTintInput = input.bool(true, 'Candle Tint (trend)', group = SMC_GROUP)
+
+PANEL_GROUP = 'Panel'
+panelShowInput = input.bool(true, 'Show Panel', group = PANEL_GROUP)
+panelTextSizeInput = input.string('Small', 'Text Size', group = PANEL_GROUP, options = ['Tiny', 'Small', 'Normal'])
+panelBgTranspInput = input.int(70, 'Background Transparency', group = PANEL_GROUP, minval = 0, maxval = 100)
+
+string sessionsTz = sessionsTimezoneInput == 'Exchange' ? syminfo.timezone : sessionsTimezoneInput
+
+in_session(string sessionStr) =>
+    not na(time(timeframe.period, sessionStr, sessionsTz))
+
+fmt_hhmm(string s) =>
+    string raw = str.trim(s)
+    str.length(raw) >= 4 ? str.substring(raw, 0, 2) + ':' + str.substring(raw, 2, 4) : raw
+
+session_range(string sessStr) =>
+    string[] parts = str.split(sessStr, '-')
+    string a = array.size(parts) > 0 ? array.get(parts, 0) : ''
+    string b = array.size(parts) > 1 ? array.get(parts, 1) : ''
+    string a0 = array.size(str.split(a, ':')) > 0 ? array.get(str.split(a, ':'), 0) : ''
+    string b0 = array.size(str.split(b, ':')) > 0 ? array.get(str.split(b, ':'), 0) : ''
+    fmt_hhmm(a0) + '-' + fmt_hhmm(b0)
+
+bool inAsia = sessionsShowInput and asiaShowInput and in_session(asiaSessionInput)
+bool inLondon = sessionsShowInput and londonShowInput and in_session(londonSessionInput)
+bool inNY = sessionsShowInput and nyShowInput and in_session(nySessionInput)
+
+string asiaRange = session_range(asiaSessionInput)
+string londonRange = session_range(londonSessionInput)
+string nyRange = session_range(nySessionInput)
+
+smc_pivots(int len) =>
+    float hsrc = smcSwingSourceInput == 'Body' ? math.max(open, close) : high
+    float lsrc = smcSwingSourceInput == 'Body' ? math.min(open, close) : low
+    float ph_ = ta.pivothigh(hsrc, len, len)
+    float pl_ = ta.pivotlow(lsrc, len, len)
+    int phTime_ = not na(ph_) ? time[len] : na
+    int plTime_ = not na(pl_) ? time[len] : na
+    [ph_, phTime_, pl_, plTime_]
+
+[smcPhRaw, smcPhTimeRaw, smcPlRaw, smcPlTimeRaw] = request.security(syminfo.tickerid, smcTimeframeInput, smc_pivots(smcPivotLenInput), barmerge.gaps_off, barmerge.lookahead_off)
+float smcPh = smcShowInput ? smcPhRaw : na
+int smcPhTime = smcShowInput ? smcPhTimeRaw : na
+float smcPl = smcShowInput ? smcPlRaw : na
+int smcPlTime = smcShowInput ? smcPlTimeRaw : na
+
+smcLblSize = switch smcLabelSizeInput
+    'Tiny' => size.tiny
+    'Small' => size.small
+    => size.normal
+
+panelSize = switch panelTextSizeInput
+    'Tiny' => size.tiny
+    'Small' => size.small
+    => size.normal
+
+var label[] smcLabels = array.new_label()
+var line[] smcEventLines = array.new_line()
+var float smcPrevHigh = na
+var float smcPrevLow = na
+var float smcLastHigh = na
+var float smcLastLow = na
+var int smcLastHighTime = na
+var int smcLastLowTime = na
+var int smcTrend = 0
+var string smcLastEvent = '—'
+var string smcLastSweep = '—'
+var int lqLastHighSwingTime = na
+var int lqLastLowSwingTime = na
+
+bool smcNewHigh = smcShowInput and not na(smcPhTime) and (na(smcLastHighTime) or smcPhTime != smcLastHighTime)
+bool smcNewLow = smcShowInput and not na(smcPlTime) and (na(smcLastLowTime) or smcPlTime != smcLastLowTime)
+
+if smcNewHigh
+    smcPrevHigh := smcLastHigh
+    smcLastHigh := smcPh
+    smcLastHighTime := smcPhTime
+    string t = na(smcPrevHigh) ? 'SH' : smcLastHigh > smcPrevHigh ? 'HH' : 'LH'
+    color tc = na(smcPrevHigh) ? smcNeutralColorInput : t == 'HH' ? smcBullColorInput : smcBearColorInput
+    label lb = label.new(smcLastHighTime, smcLastHigh, text = t, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.black, 100), textcolor = tc, size = smcLblSize)
+    array.push(smcLabels, lb)
+    if array.size(smcLabels) > smcMaxLabelsInput
+        label.delete(array.shift(smcLabels))
+
+if smcNewLow
+    smcPrevLow := smcLastLow
+    smcLastLow := smcPl
+    smcLastLowTime := smcPlTime
+    string t = na(smcPrevLow) ? 'SL' : smcLastLow < smcPrevLow ? 'LL' : 'HL'
+    color tc = na(smcPrevLow) ? smcNeutralColorInput : t == 'HL' ? smcBullColorInput : smcBearColorInput
+    label lb = label.new(smcLastLowTime, smcLastLow, text = t, xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.black, 100), textcolor = tc, size = smcLblSize)
+    array.push(smcLabels, lb)
+    if array.size(smcLabels) > smcMaxLabelsInput
+        label.delete(array.shift(smcLabels))
+
+bool wantCloseBack = lqModeInput == 'CloseBack'
+bool lqUpRaw = lqShowInput and smcShowInput and not na(smcLastHigh) and high > smcLastHigh and (not wantCloseBack or close < smcLastHigh)
+bool lqDownRaw = lqShowInput and smcShowInput and not na(smcLastLow) and low < smcLastLow and (not wantCloseBack or close > smcLastLow)
+bool lqUp = lqUpRaw and (na(lqLastHighSwingTime) or smcLastHighTime != lqLastHighSwingTime)
+bool lqDown = lqDownRaw and (na(lqLastLowSwingTime) or smcLastLowTime != lqLastLowSwingTime)
+
+if lqUp
+    lqLastHighSwingTime := smcLastHighTime
+    smcLastSweep := 'LQ swing↑'
+    label lb = label.new(time, high, text = 'LQ↑', xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.black, 100), textcolor = smcBullColorInput, size = smcLblSize)
+    array.push(smcLabels, lb)
+    if array.size(smcLabels) > smcMaxLabelsInput
+        label.delete(array.shift(smcLabels))
+
+if lqDown
+    lqLastLowSwingTime := smcLastLowTime
+    smcLastSweep := 'LQ swing↓'
+    label lb = label.new(time, low, text = 'LQ↓', xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.black, 100), textcolor = smcBearColorInput, size = smcLblSize)
+    array.push(smcLabels, lb)
+    if array.size(smcLabels) > smcMaxLabelsInput
+        label.delete(array.shift(smcLabels))
+
+bool smcBreakUp = smcShowInput and not na(smcLastHigh) and ta.crossover(close, smcLastHigh)
+bool smcBreakDown = smcShowInput and not na(smcLastLow) and ta.crossunder(close, smcLastLow)
+
+if smcBreakUp
+    bool isChoch = smcTrend == -1
+    bool showEvent = (isChoch and smcShowChochInput) or (not isChoch and smcShowBosInput)
+    if showEvent
+        string ev = (isChoch ? 'CHoCH' : 'BOS') + '↑'
+        label lb = label.new(time, high, text = ev, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.black, 100), textcolor = smcBullColorInput, size = smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+        if smcShowEventLinesInput
+            line ln = line.new(bar_index, smcLastHigh, bar_index + smcEventLineBarsInput, smcLastHigh, xloc = xloc.bar_index, extend = extend.none, color = color.new(smcBullColorInput, 0), style = line.style_dashed, width = 1)
+            array.push(smcEventLines, ln)
+            if array.size(smcEventLines) > smcMaxEventLinesInput and smcMaxEventLinesInput > 0
+                line.delete(array.shift(smcEventLines))
+        smcLastEvent := ev
+    smcTrend := 1
+
+if smcBreakDown
+    bool isChoch = smcTrend == 1
+    bool showEvent = (isChoch and smcShowChochInput) or (not isChoch and smcShowBosInput)
+    if showEvent
+        string ev = (isChoch ? 'CHoCH' : 'BOS') + '↓'
+        label lb = label.new(time, low, text = ev, xloc = xloc.bar_time, style = label.style_label_up, color = color.new(color.black, 100), textcolor = smcBearColorInput, size = smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+        if smcShowEventLinesInput
+            line ln = line.new(bar_index, smcLastLow, bar_index + smcEventLineBarsInput, smcLastLow, xloc = xloc.bar_index, extend = extend.none, color = color.new(smcBearColorInput, 0), style = line.style_dashed, width = 1)
+            array.push(smcEventLines, ln)
+            if array.size(smcEventLines) > smcMaxEventLinesInput and smcMaxEventLinesInput > 0
+                line.delete(array.shift(smcEventLines))
+        smcLastEvent := ev
+    smcTrend := -1
+
+string smcTrendText = not smcShowInput ? 'Off' : smcTrend == 1 ? 'Up' : smcTrend == -1 ? 'Down' : '—'
+color trendColor = smcTrend == 1 ? smcBullColorInput : smcTrend == -1 ? smcBearColorInput : smcNeutralColorInput
+barcolor(smcCandleTintInput and smcShowInput and smcTrend != 0 ? color.new(trendColor, 70) : na)
+
+if panelShowInput and barstate.islast
+    var table t = table.new(position.top_right, 2, 10, bgcolor = color.new(BACKGROUND, panelBgTranspInput), frame_color = BORDERS, frame_width = 1)
+    table.cell(t, 0, 0, 'Sessions (' + sessionsTz + ')', text_color = DATA, text_size = panelSize)
+    table.cell(t, 1, 0, '', text_color = DATA, text_size = panelSize)
+
+    color asiaTc = sessionsShowInput and inAsia ? asiaColorInput : DATA
+    color londonTc = sessionsShowInput and inLondon ? londonColorInput : DATA
+    color nyTc = sessionsShowInput and inNY ? nyColorInput : DATA
+
+    table.cell(t, 0, 1, 'Asia', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 1, sessionsShowInput and asiaShowInput ? (asiaNameInput + ' ' + asiaRange) : 'Off', text_color = asiaTc, text_size = panelSize)
+    table.cell(t, 0, 2, 'London', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 2, sessionsShowInput and londonShowInput ? (londonNameInput + ' ' + londonRange) : 'Off', text_color = londonTc, text_size = panelSize)
+    table.cell(t, 0, 3, 'New York', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 3, sessionsShowInput and nyShowInput ? (nyNameInput + ' ' + nyRange) : 'Off', text_color = nyTc, text_size = panelSize)
+
+    table.cell(t, 0, 5, 'Smart Money', text_color = DATA, text_size = panelSize)
+    table.cell(t, 1, 5, '', text_color = DATA, text_size = panelSize)
+
+    table.cell(t, 0, 6, 'Structure', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 6, smcTrendText, text_color = trendColor, text_size = panelSize)
+    table.cell(t, 0, 7, 'BOS/CHoCH', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 7, smcLastEvent, text_color = DATA, text_size = panelSize)
+    table.cell(t, 0, 8, 'LQ Sweep', text_color = HEADERS, text_size = panelSize)
+    table.cell(t, 1, 8, smcLastSweep, text_color = DATA, text_size = panelSize)

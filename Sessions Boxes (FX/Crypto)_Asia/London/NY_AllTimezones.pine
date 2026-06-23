@@ -1,0 +1,1217 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlphaX
+
+//@version=6
+indicator("[ A L P H A X ] Order Blocks Institutional Supply & Demand Zone", shorttitle="AlphaX OB",
+  overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500, max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ INPUTS ═══════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Zone Detection ─────────────────────────────────────────────────────────────
+consecutiveBars = input.int(3,     "Consecutive Candles Required", minval=2,  maxval=5,
+  tooltip="Number of same-direction candles needed to confirm a supply/demand move.",
+  group="Zone Detection")
+originLookback  = input.int(6,     "Origin Candle Lookback",      minval=3,  maxval=12,
+  tooltip="How many bars to look back for the origin (opposite color) candle that started the move.",
+  group="Zone Detection")
+volMultiplier   = input.float(1.0, "Volume Threshold Multiplier", minval=0.5, maxval=3.0, step=0.1,
+  tooltip="Volume on the impulse must exceed SMA × this multiplier. Higher = stricter zone detection.",
+  group="Zone Detection")
+volSMALen       = input.int(50,    "Volume SMA Length",            minval=20,  maxval=200,
+  tooltip="Period for the volume moving average used as the baseline.",
+  group="Zone Detection")
+atrMultZone     = input.float(1.5, "Zone Height (ATR Multiple)",   minval=0.5, maxval=4.0, step=0.1,
+  tooltip="Controls how tall each zone box is. Higher = thicker zones.",
+  group="Zone Detection")
+maxZones        = input.int(8,     "Max Active Zones Per Side",    minval=3,  maxval=15,
+  tooltip="Maximum supply and demand zones shown simultaneously.",
+  group="Zone Detection")
+zoneCooldown    = input.int(10,    "Zone Cooldown (bars)",         minval=5,  maxval=30,
+  tooltip="Minimum bars between new zone detections of the same type.",
+  group="Zone Detection")
+
+// ── Zone Behavior ──────────────────────────────────────────────────────────────
+maxTouches      = input.int(4,     "Max Touches Before Weak",     minval=2,  maxval=8,
+  tooltip="After this many tests, the zone is considered weak and visually faded.",
+  group="Zone Behavior")
+breakConfirm    = input.bool(true, "Require Close to Break Zone",
+  tooltip="Zone only breaks when candle CLOSES beyond it, not just wicks through.",
+  group="Zone Behavior")
+showFlipZones   = input.bool(true, "Detect Flip Zones",
+  tooltip="When a supply zone breaks upward, mark it as potential demand (and vice versa).",
+  group="Zone Behavior")
+
+// ── Confluence Filters ─────────────────────────────────────────────────────────
+emaFastLen      = input.int(21,    "Fast EMA Period",              minval=5,   maxval=50,   group="Confluence")
+emaSlowLen      = input.int(200,   "Slow EMA Period",              minval=50,  maxval=500,  group="Confluence")
+showEMAs        = input.bool(true, "Show EMAs",                                              group="Confluence")
+useEMAConfl     = input.bool(true, "Use EMA Confluence in Scoring",                          group="Confluence")
+
+// ── Signals ────────────────────────────────────────────────────────────────────
+showSignals     = input.bool(true, "Show Entry Signals",
+  tooltip="Generate signals when price enters a high-quality zone with confirmation.",
+  group="Signals")
+minZoneScore    = input.int(40,    "Min Zone Strength for Signal", minval=10,  maxval=80,
+  group="Signals")
+sigCooldown     = input.int(5,     "Signal Cooldown (bars)",       minval=1,   maxval=20,
+  group="Signals")
+showProximity   = input.bool(true, "Show Proximity Warnings",
+  tooltip="Alert when price is approaching a zone.",
+  group="Signals")
+proximityATR    = input.float(1.5, "Proximity Distance (ATR)",    minval=0.5, maxval=5.0, step=0.5,
+  group="Signals")
+
+// ── Risk/Reward ────────────────────────────────────────────────────────────────
+showRR          = input.bool(true, "Show Risk/Reward Projection",
+  tooltip="When a signal fires, project target to the nearest opposite zone.",
+  group="Risk/Reward")
+
+// ── Dashboard ──────────────────────────────────────────────────────────────────
+showDash        = input.bool(true,  "Show Dashboard",              group="Dashboard")
+dashPos         = input.string("Top Right", "Position",
+  options=["Top Left","Top Right","Bottom Left","Bottom Right"],    group="Dashboard")
+dashSizeInput   = input.string("Small", "Dashboard Text",
+  options=["Tiny","Small","Normal"],                                group="Dashboard")
+
+// ── Appearance ─────────────────────────────────────────────────────────────────
+labelSizeInput  = input.string("Small", "Label Size",
+  options=["Tiny","Small","Normal"],                                group="Appearance")
+
+// ── Colors ─────────────────────────────────────────────────────────────────────
+colBullPrimary  = input.color(#c8e624, "Bull / Demand Primary",   group="Colors")
+colBullBright   = input.color(#d4f03a, "Bull Bright",              group="Colors")
+colBullDim      = input.color(#9ab81c, "Bull Dim",                 group="Colors")
+colBearPrimary  = input.color(#ff1744, "Bear / Supply Primary",    group="Colors")
+colBearBright   = input.color(#ff5252, "Bear Bright",              group="Colors")
+colBearDim      = input.color(#d50032, "Bear Dim",                 group="Colors")
+colFlipZone     = input.color(#ab47bc, "Flip Zone",                group="Colors")
+colNeutral      = input.color(#555555, "Neutral",                  group="Colors")
+colNeutralLight = input.color(#888888, "Neutral Light",            group="Colors")
+colTextLight    = input.color(#cccccc, "Text Light",               group="Colors")
+colDashBg       = input.color(#1a1a1a, "Dashboard Background",     group="Colors")
+colProximity    = input.color(#ff9800, "Proximity Warning",        group="Colors")
+
+sessionsShowInput = input.bool(true, "Show Sessions (panel only)", group="Sessions")
+sessionsTimezoneInput = input.string("Exchange", "Timezone",
+  options=["Exchange", "Etc/UTC", "UTC", "Europe/London", "America/New_York", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Singapore", "Australia/Sydney"],
+  group="Sessions")
+asiaShowInput = input.bool(true, "Asia", group="Sessions", inline="SES1")
+asiaSessionInput = input.session("0000-0900", "", group="Sessions", inline="SES1")
+asiaColorInput = input.color(color.rgb(0, 150, 136), "", group="Sessions", inline="SES1")
+asiaNameInput = input.string("Asia", "Asia Name", group="Sessions")
+londonShowInput = input.bool(true, "London", group="Sessions", inline="SES2")
+londonSessionInput = input.session("0700-1600", "", group="Sessions", inline="SES2")
+londonColorInput = input.color(color.rgb(33, 150, 243), "", group="Sessions", inline="SES2")
+londonNameInput = input.string("London", "London Name", group="Sessions")
+nyShowInput = input.bool(true, "New York", group="Sessions", inline="SES3")
+nySessionInput = input.session("1200-2100", "", group="Sessions", inline="SES3")
+nyColorInput = input.color(color.rgb(244, 67, 54), "", group="Sessions", inline="SES3")
+nyNameInput = input.string("New York", "New York Name", group="Sessions")
+
+smcShowInput = input.bool(true, "Show Smart Money (BOS/CHoCH)", group="Smart Money")
+smcTimeframeInput = input.timeframe("60", "SMC Timeframe", group="Smart Money")
+smcPivotLenInput = input.int(5, "Pivot Length", group="Smart Money", minval=1, maxval=50)
+smcSourceInput = input.string("Wick", "Swing Source", group="Smart Money", options=["Wick", "Body"])
+smcShowStructureLabelsInput = input.bool(true, "Show HH/HL/LH/LL", group="Smart Money")
+smcMaxLabelsInput = input.int(150, "Max Labels", group="Smart Money", minval=10, maxval=500)
+smcShowBandsInput = input.bool(true, "Highlight BOS/CHoCH (bands)", group="Smart Money")
+smcBandTranspInput = input.int(94, "Band Transparency", group="Smart Money", minval=0, maxval=100)
+smcEventTranspInput = input.int(85, "Event Bar Transparency", group="Smart Money", minval=0, maxval=100)
+smcShowBosInput = input.bool(true, "Show BOS", group="Smart Money")
+smcShowChochInput = input.bool(true, "Show CHoCH", group="Smart Money")
+smcLabelSizeInput = input.string("Tiny", "SMC Label Size", options=["Tiny","Small","Normal"], group="Smart Money")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ HELPERS ═══════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+getLabelSize(sz) =>
+    switch sz
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+
+getDashPos(p) =>
+    switch p
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+
+string sessionsTz = sessionsTimezoneInput == "Exchange" ? syminfo.timezone : sessionsTimezoneInput
+
+in_session(string sessionStr) =>
+    not na(time(timeframe.period, sessionStr, sessionsTz))
+
+fmt_hhmm(string s) =>
+    string raw = str.trim(s)
+    str.length(raw) >= 4 ? str.substring(raw, 0, 2) + ":" + str.substring(raw, 2, 4) : raw
+
+session_range(string sessStr) =>
+    string[] parts = str.split(sessStr, "-")
+    string a = array.size(parts) > 0 ? array.get(parts, 0) : ""
+    string b = array.size(parts) > 1 ? array.get(parts, 1) : ""
+    string a0 = array.size(str.split(a, ":")) > 0 ? array.get(str.split(a, ":"), 0) : ""
+    string b0 = array.size(str.split(b, ":")) > 0 ? array.get(str.split(b, ":"), 0) : ""
+    fmt_hhmm(a0) + "-" + fmt_hhmm(b0)
+
+labelSize    = getLabelSize(labelSizeInput)
+dashTextSize = getLabelSize(dashSizeInput)
+smcLblSize   = getLabelSize(smcLabelSizeInput)
+
+bool inAsia = sessionsShowInput and asiaShowInput and in_session(asiaSessionInput)
+bool inLondon = sessionsShowInput and londonShowInput and in_session(londonSessionInput)
+bool inNY = sessionsShowInput and nyShowInput and in_session(nySessionInput)
+
+string asiaRange = session_range(asiaSessionInput)
+string londonRange = session_range(londonSessionInput)
+string nyRange = session_range(nySessionInput)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ CORE CALCULATIONS ═══════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+atrVal    = ta.atr(200)
+zoneH     = atrVal * atrMultZone
+volSMA    = ta.sma(volume, volSMALen)
+extraVol  = volume > volSMA * volMultiplier
+bullBar   = close > open
+bearBar   = close < open
+emaFast   = ta.ema(close, emaFastLen)
+emaSlow   = ta.ema(close, emaSlowLen)
+rsiVal    = ta.rsi(close, 14)
+
+smc_pivots(int len) =>
+    float hsrc = smcSourceInput == "Body" ? math.max(open, close) : high
+    float lsrc = smcSourceInput == "Body" ? math.min(open, close) : low
+    float ph = ta.pivothigh(hsrc, len, len)
+    float pl = ta.pivotlow(lsrc, len, len)
+    int phTime = not na(ph) ? time[len] : na
+    int plTime = not na(pl) ? time[len] : na
+    [ph, phTime, pl, plTime]
+
+[smcPh, smcPhTime, smcPl, smcPlTime] = request.security(syminfo.tickerid, smcTimeframeInput, smc_pivots(smcPivotLenInput), barmerge.gaps_off, barmerge.lookahead_off)
+
+var label[] smcLabels = array.new_label()
+var float smcPrevHigh = na
+var float smcPrevLow = na
+var float smcLastHigh = na
+var float smcLastLow = na
+var int smcLastHighTime = na
+var int smcLastLowTime = na
+var int smcTrend = 0
+var string smcLastEvent = "—"
+var int smcBandKind = 0
+var int smcBandDir = 0
+
+bool smcNewHigh = smcShowInput and not na(smcPhTime) and (na(smcLastHighTime) or smcPhTime != smcLastHighTime)
+bool smcNewLow = smcShowInput and not na(smcPlTime) and (na(smcLastLowTime) or smcPlTime != smcLastLowTime)
+
+if smcNewHigh
+    smcPrevHigh := smcLastHigh
+    smcLastHigh := smcPh
+    smcLastHighTime := smcPhTime
+    if smcShowStructureLabelsInput
+        string t = na(smcPrevHigh) ? "SH" : smcLastHigh > smcPrevHigh ? "HH" : "LH"
+        color tc = na(smcPrevHigh) ? colNeutralLight : t == "HH" ? colBullPrimary : colBearPrimary
+        label lb = label.new(smcLastHighTime, smcLastHigh, text=t, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.black, 100), textcolor=tc, size=smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+
+if smcNewLow
+    smcPrevLow := smcLastLow
+    smcLastLow := smcPl
+    smcLastLowTime := smcPlTime
+    if smcShowStructureLabelsInput
+        string t = na(smcPrevLow) ? "SL" : smcLastLow < smcPrevLow ? "LL" : "HL"
+        color tc = na(smcPrevLow) ? colNeutralLight : t == "HL" ? colBullPrimary : colBearPrimary
+        label lb = label.new(smcLastLowTime, smcLastLow, text=t, xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.black, 100), textcolor=tc, size=smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+
+bool smcEventBar = false
+color smcEventColor = colNeutral
+color bosUpColor = colBullPrimary
+color bosDownColor = colBearPrimary
+color chochUpColor = colProximity
+color chochDownColor = colFlipZone
+
+bool smcBreakUp = smcShowInput and not na(smcLastHigh) and ta.crossover(close, smcLastHigh)
+bool smcBreakDown = smcShowInput and not na(smcLastLow) and ta.crossunder(close, smcLastLow)
+
+if smcBreakUp
+    bool isChoch = smcTrend == -1
+    bool showEvent = (isChoch and smcShowChochInput) or (not isChoch and smcShowBosInput)
+    if showEvent
+        string ev = (isChoch ? "CHoCH" : "BOS") + "↑"
+        label lb = label.new(time, high, text=ev, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(color.black, 100), textcolor=(isChoch ? chochUpColor : bosUpColor), size=smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+        smcLastEvent := ev
+        smcBandKind := isChoch ? 2 : 1
+        smcBandDir := 1
+        smcEventBar := true
+        smcEventColor := isChoch ? chochUpColor : bosUpColor
+    smcTrend := 1
+
+if smcBreakDown
+    bool isChoch = smcTrend == 1
+    bool showEvent = (isChoch and smcShowChochInput) or (not isChoch and smcShowBosInput)
+    if showEvent
+        string ev = (isChoch ? "CHoCH" : "BOS") + "↓"
+        label lb = label.new(time, low, text=ev, xloc=xloc.bar_time, style=label.style_label_up, color=color.new(color.black, 100), textcolor=(isChoch ? chochDownColor : bosDownColor), size=smcLblSize)
+        array.push(smcLabels, lb)
+        if array.size(smcLabels) > smcMaxLabelsInput
+            label.delete(array.shift(smcLabels))
+        smcLastEvent := ev
+        smcBandKind := isChoch ? 2 : 1
+        smcBandDir := -1
+        smcEventBar := true
+        smcEventColor := isChoch ? chochDownColor : bosDownColor
+    smcTrend := -1
+
+color smcBandColor = smcBandKind == 1 ? (smcBandDir == 1 ? bosUpColor : bosDownColor) : smcBandKind == 2 ? (smcBandDir == 1 ? chochUpColor : chochDownColor) : na
+color smcBg = smcEventBar ? smcEventColor : smcBandColor
+int smcBgTransp = smcEventBar ? smcEventTranspInput : smcBandTranspInput
+bgcolor(smcShowBandsInput and smcShowInput and not na(smcBg) ? color.new(smcBg, smcBgTransp) : na)
+
+string smcTrendText = not smcShowInput ? "OFF" : smcTrend == 1 ? "▲ UP" : smcTrend == -1 ? "▼ DOWN" : "—"
+color smcTrendClr = smcTrend == 1 ? colBullPrimary : smcTrend == -1 ? colBearPrimary : colNeutralLight
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ ZONE DATA STRUCTURE ═════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Supply zone arrays
+var array<box>   supplyBoxes     = array.new<box>()
+var array<float> supplyTops      = array.new<float>()
+var array<float> supplyBots      = array.new<float>()
+var array<int>   supplyBirthBar  = array.new<int>()
+var array<int>   supplyTouches   = array.new<int>()
+var array<float> supplyDelta     = array.new<float>()
+var array<float> supplyVolRatio  = array.new<float>()
+var array<float> supplyDepartVel = array.new<float>()
+var array<bool>  supplyIsFlip    = array.new<bool>()
+
+// Demand zone arrays
+var array<box>   demandBoxes     = array.new<box>()
+var array<float> demandTops      = array.new<float>()
+var array<float> demandBots      = array.new<float>()
+var array<int>   demandBirthBar  = array.new<int>()
+var array<int>   demandTouches   = array.new<int>()
+var array<float> demandDelta     = array.new<float>()
+var array<float> demandVolRatio  = array.new<float>()
+var array<float> demandDepartVel = array.new<float>()
+var array<bool>  demandIsFlip    = array.new<bool>()
+
+// Cooldown counters
+var int lastSupplyBar = -999
+var int lastDemandBar = -999
+
+// Signal cooldown
+var int lastBullSigBar = -999
+var int lastBearSigBar = -999
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ ZONE DETECTION ══════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Check for consecutive bearish candles (supply zone)
+supplyConsec = true
+for i = 0 to consecutiveBars - 1
+    if not (close[i] < open[i])
+        supplyConsec := false
+        break
+
+// Check for consecutive bullish candles (demand zone)
+demandConsec = true
+for i = 0 to consecutiveBars - 1
+    if not (close[i] > open[i])
+        demandConsec := false
+        break
+
+// ── Supply Zone Detection ─────────────────────────────────────────────────────
+if supplyConsec and extraVol[1] and (bar_index - lastSupplyBar >= zoneCooldown)
+    float originHigh = na
+    float originLow  = na
+    int   originBar  = na
+    float delta      = 0.0
+    float departureMove = 0.0
+
+    for i = 0 to originLookback
+        if bullBar[i]
+            originHigh := high[i]
+            originLow  := low[i]
+            originBar  := bar_index - i
+
+            // Calculate departure velocity (how fast price left)
+            departureMove := math.abs(close - high[i]) / atrVal
+            break
+        delta += bearBar[i] ? -volume[i] : volume[i]
+
+    if not na(originHigh) and not na(originBar)
+        float zTop = originHigh + zoneH * 0.2
+        float zBot = originLow
+
+        // Volume ratio at origin
+        float vRatio = volSMA > 0 ? volume[bar_index - originBar] / volSMA : 1.0
+
+        // Check for overlapping zones
+        bool overlap = false
+        if supplyBoxes.size() > 0
+            for i = 0 to supplyBoxes.size() - 1
+                float eTop = supplyTops.get(i)
+                float eBot = supplyBots.get(i)
+                if zTop >= eBot and zBot <= eTop
+                    overlap := true
+                    break
+
+        if not overlap
+            supplyBoxes.push(box.new(originBar, zTop, bar_index + 20, zBot,
+              border_color=colBearPrimary,
+              border_width=2,
+              bgcolor=color.new(colBearPrimary, 88)))
+            supplyTops.push(zTop)
+            supplyBots.push(zBot)
+            supplyBirthBar.push(bar_index)
+            supplyTouches.push(0)
+            supplyDelta.push(delta)
+            supplyVolRatio.push(vRatio)
+            supplyDepartVel.push(departureMove)
+            supplyIsFlip.push(false)
+            lastSupplyBar := bar_index
+
+// ── Demand Zone Detection ─────────────────────────────────────────────────────
+if demandConsec and extraVol[1] and (bar_index - lastDemandBar >= zoneCooldown)
+    float originHigh = na
+    float originLow  = na
+    int   originBar  = na
+    float delta      = 0.0
+    float departureMove = 0.0
+
+    for i = 0 to originLookback
+        if bearBar[i]
+            originHigh := high[i]
+            originLow  := low[i]
+            originBar  := bar_index - i
+
+            departureMove := math.abs(close - low[i]) / atrVal
+            break
+        delta += bullBar[i] ? volume[i] : -volume[i]
+
+    if not na(originLow) and not na(originBar)
+        float zTop = originHigh
+        float zBot = originLow - zoneH * 0.2
+
+        float vRatio = volSMA > 0 ? volume[bar_index - originBar] / volSMA : 1.0
+
+        bool overlap = false
+        if demandBoxes.size() > 0
+            for i = 0 to demandBoxes.size() - 1
+                float eTop = demandTops.get(i)
+                float eBot = demandBots.get(i)
+                if zTop >= eBot and zBot <= eTop
+                    overlap := true
+                    break
+
+        if not overlap
+            demandBoxes.push(box.new(originBar, zTop, bar_index + 20, zBot,
+              border_color=colBullPrimary,
+              border_width=2,
+              bgcolor=color.new(colBullPrimary, 88)))
+            demandTops.push(zTop)
+            demandBots.push(zBot)
+            demandBirthBar.push(bar_index)
+            demandTouches.push(0)
+            demandDelta.push(delta)
+            demandVolRatio.push(vRatio)
+            demandDepartVel.push(departureMove)
+            demandIsFlip.push(false)
+            lastDemandBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ ZONE STRENGTH SCORING ══════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+calcZoneStrength(touches, volRat, departVel, birthBar, isFlip, isBull) =>
+    float s = 0.0
+
+    // Freshness — untested zones score highest (max 25)
+    s += touches == 0 ? 25.0 :
+      touches == 1 ? 18.0 :
+      touches == 2 ? 10.0 :
+      touches == 3 ? 4.0 : 0.0
+
+    // Volume at origin (max 20)
+    s += volRat > 3.0 ? 20.0 :
+      volRat > 2.0 ? 16.0 :
+      volRat > 1.5 ? 12.0 :
+      volRat > 1.0 ? 7.0 : 3.0
+
+    // Departure velocity (max 20)
+    s += departVel > 3.0 ? 20.0 :
+      departVel > 2.0 ? 15.0 :
+      departVel > 1.0 ? 10.0 :
+      departVel > 0.5 ? 5.0 : 2.0
+
+    // Age — younger zones score higher (max 15)
+    int age = bar_index - birthBar
+    s += age < 20 ? 15.0 :
+      age < 50 ? 12.0 :
+      age < 100 ? 8.0 :
+      age < 200 ? 4.0 : 1.0
+
+    // EMA confluence (max 10)
+    if useEMAConfl
+        if isBull
+            s += close < emaSlow ? 10.0 :
+              close < emaFast ? 6.0 : 2.0
+        else
+            s += close > emaSlow ? 10.0 :
+              close > emaFast ? 6.0 : 2.0
+
+    // Flip zone bonus (max 10)
+    s += isFlip ? 10.0 : 0.0
+
+    math.max(0.0, math.min(100.0, s))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ ZONE MANAGEMENT ════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Track zone events for signals
+var bool supplyTouch = false
+var bool demandTouch = false
+var float nearestSupplyBot = na
+var float nearestDemandTop = na
+var float bestSupplyScore = 0.0
+var float bestDemandScore = 0.0
+
+supplyTouch := false
+demandTouch := false
+nearestSupplyBot := na
+nearestDemandTop := na
+bestSupplyScore := 0.0
+bestDemandScore := 0.0
+
+// ── Manage Supply Zones ───────────────────────────────────────────────────────
+if supplyBoxes.size() > 0
+    int idx = supplyBoxes.size() - 1
+    while idx >= 0
+        sBox = supplyBoxes.get(idx)
+        sTop = supplyTops.get(idx)
+        sBot = supplyBots.get(idx)
+        sTch = supplyTouches.get(idx)
+        sBirth = supplyBirthBar.get(idx)
+        sVR  = supplyVolRatio.get(idx)
+        sDV  = supplyDepartVel.get(idx)
+        sFlip = supplyIsFlip.get(idx)
+        sDelta = supplyDelta.get(idx)
+
+        float strength = calcZoneStrength(sTch, sVR, sDV, sBirth, sFlip, false)
+
+        bool broken = breakConfirm ? close > sTop : high > sTop
+
+        if broken
+            // Zone broken
+            box.delete(sBox)
+
+            // Flip zone detection
+            if showFlipZones
+                demandBoxes.push(box.new(bar_index, sTop, bar_index + 20, sBot,
+                  border_color=colFlipZone,
+                  border_width=2,
+                  bgcolor=color.new(colFlipZone, 90)))
+                demandTops.push(sTop)
+                demandBots.push(sBot)
+                demandBirthBar.push(bar_index)
+                demandTouches.push(0)
+                demandDelta.push(math.abs(sDelta))
+                demandVolRatio.push(sVR)
+                demandDepartVel.push(sDV * 0.7)
+                demandIsFlip.push(true)
+
+            supplyBoxes.remove(idx)
+            supplyTops.remove(idx)
+            supplyBots.remove(idx)
+            supplyBirthBar.remove(idx)
+            supplyTouches.remove(idx)
+            supplyDelta.remove(idx)
+            supplyVolRatio.remove(idx)
+            supplyDepartVel.remove(idx)
+            supplyIsFlip.remove(idx)
+
+        else
+            // Check for touch
+            bool touched = high >= sBot and high <= sTop and close < sTop
+            if touched and close[1] < sBot
+                supplyTouches.set(idx, sTch + 1)
+                supplyTouch := true
+
+            // Update box visuals
+            box.set_right(sBox, bar_index + 20)
+            box.set_extend(sBox, extend.right)
+
+            // Tier text
+            string tier = strength >= 75 ? "S" :
+              strength >= 55 ? "A" :
+              strength >= 35 ? "B" : "C"
+            string touchStr = str.tostring(supplyTouches.get(idx))
+
+            string zText = "Supply [" + tier + "]  ×" + touchStr +
+              "\n" + str.tostring(sDelta, format.volume) +
+              "  (" + str.tostring(strength, "#") + "%)"
+
+            box.set_text(sBox, zText)
+            box.set_text_halign(sBox, text.align_right)
+            box.set_text_valign(sBox, text.align_top)
+            box.set_text_size(sBox, size.tiny)
+
+            // Visual styling based on strength and touches
+            int tc = supplyTouches.get(idx)
+            if tc >= maxTouches
+                box.set_border_style(sBox, line.style_dotted)
+                box.set_border_width(sBox, 1)
+                box.set_text_color(sBox, color.new(colBearDim, 50))
+                box.set_border_color(sBox, color.new(colBearDim, 50))
+                box.set_bgcolor(sBox, color.new(colBearDim, 95))
+            else if tc >= 2
+                box.set_border_style(sBox, line.style_dashed)
+                box.set_border_width(sBox, 1)
+                box.set_text_color(sBox, color.new(colBearPrimary, 30))
+                box.set_border_color(sBox, color.new(colBearPrimary, 30))
+                box.set_bgcolor(sBox, color.new(colBearPrimary, 90))
+            else if tc == 1
+                box.set_border_style(sBox, line.style_solid)
+                box.set_border_width(sBox, 1)
+                box.set_text_color(sBox, color.new(colBearPrimary, 20))
+                box.set_border_color(sBox, color.new(colBearPrimary, 20))
+                box.set_bgcolor(sBox, color.new(colBearPrimary, 88))
+            else
+                color sColor = sFlip ? colFlipZone : colBearPrimary
+                box.set_border_style(sBox, line.style_solid)
+                box.set_border_width(sBox, 2)
+                box.set_text_color(sBox, color.new(sColor, 10))
+                box.set_border_color(sBox, color.new(sColor, 10))
+                box.set_bgcolor(sBox, color.new(sColor, 85))
+
+            // Track nearest supply for RR
+            if na(nearestSupplyBot) or sBot < nearestSupplyBot
+                nearestSupplyBot := sBot
+                bestSupplyScore := strength
+
+        idx -= 1
+
+// ── Manage Demand Zones ───────────────────────────────────────────────────────
+if demandBoxes.size() > 0
+    int idx = demandBoxes.size() - 1
+    while idx >= 0
+        dBox = demandBoxes.get(idx)
+        dTop = demandTops.get(idx)
+        dBot = demandBots.get(idx)
+        dTch = demandTouches.get(idx)
+        dBirth = demandBirthBar.get(idx)
+        dVR  = demandVolRatio.get(idx)
+        dDV  = demandDepartVel.get(idx)
+        dFlip = demandIsFlip.get(idx)
+        dDelta = demandDelta.get(idx)
+
+        float strength = calcZoneStrength(dTch, dVR, dDV, dBirth, dFlip, true)
+
+        bool broken = breakConfirm ? close < dBot : low < dBot
+
+        if broken
+            box.delete(dBox)
+
+            // Flip zone detection
+            if showFlipZones
+                supplyBoxes.push(box.new(bar_index, dTop, bar_index + 20, dBot,
+                  border_color=colFlipZone,
+                  border_width=2,
+                  bgcolor=color.new(colFlipZone, 90)))
+                supplyTops.push(dTop)
+                supplyBots.push(dBot)
+                supplyBirthBar.push(bar_index)
+                supplyTouches.push(0)
+                supplyDelta.push(-math.abs(dDelta))
+                supplyVolRatio.push(dVR)
+                supplyDepartVel.push(dDV * 0.7)
+                supplyIsFlip.push(true)
+
+            demandBoxes.remove(idx)
+            demandTops.remove(idx)
+            demandBots.remove(idx)
+            demandBirthBar.remove(idx)
+            demandTouches.remove(idx)
+            demandDelta.remove(idx)
+            demandVolRatio.remove(idx)
+            demandDepartVel.remove(idx)
+            demandIsFlip.remove(idx)
+
+        else
+            bool touched = low <= dTop and low >= dBot and close > dBot
+            if touched and close[1] > dTop
+                demandTouches.set(idx, dTch + 1)
+                demandTouch := true
+
+            box.set_right(dBox, bar_index + 20)
+            box.set_extend(dBox, extend.right)
+
+            string tier = strength >= 75 ? "S" :
+              strength >= 55 ? "A" :
+              strength >= 35 ? "B" : "C"
+            string touchStr = str.tostring(demandTouches.get(idx))
+
+            string zText = "Demand [" + tier + "]  ×" + touchStr +
+              "\n" + str.tostring(dDelta, format.volume) +
+              "  (" + str.tostring(strength, "#") + "%)"
+
+            box.set_text(dBox, zText)
+            box.set_text_halign(dBox, text.align_right)
+            box.set_text_valign(dBox, text.align_bottom)
+            box.set_text_size(dBox, size.tiny)
+
+            int tc = demandTouches.get(idx)
+            if tc >= maxTouches
+                box.set_border_style(dBox, line.style_dotted)
+                box.set_border_width(dBox, 1)
+                box.set_text_color(dBox, color.new(colBullDim, 50))
+                box.set_border_color(dBox, color.new(colBullDim, 50))
+                box.set_bgcolor(dBox, color.new(colBullDim, 95))
+            else if tc >= 2
+                box.set_border_style(dBox, line.style_dashed)
+                box.set_border_width(dBox, 1)
+                box.set_text_color(dBox, color.new(colBullPrimary, 30))
+                box.set_border_color(dBox, color.new(colBullPrimary, 30))
+                box.set_bgcolor(dBox, color.new(colBullPrimary, 90))
+            else if tc == 1
+                box.set_border_style(dBox, line.style_solid)
+                box.set_border_width(dBox, 1)
+                box.set_text_color(dBox, color.new(colBullPrimary, 20))
+                box.set_border_color(dBox, color.new(colBullPrimary, 20))
+                box.set_bgcolor(dBox, color.new(colBullPrimary, 88))
+            else
+                color dColor = dFlip ? colFlipZone : colBullPrimary
+                box.set_border_style(dBox, line.style_solid)
+                box.set_border_width(dBox, 2)
+                box.set_text_color(dBox, color.new(dColor, 10))
+                box.set_border_color(dBox, color.new(dColor, 10))
+                box.set_bgcolor(dBox, color.new(dColor, 85))
+
+            if na(nearestDemandTop) or dTop > nearestDemandTop
+                nearestDemandTop := dTop
+                bestDemandScore := strength
+
+        idx -= 1
+
+// ── Cap zone count ────────────────────────────────────────────────────────────
+while supplyBoxes.size() > maxZones
+    box.delete(supplyBoxes.shift())
+    supplyTops.shift()
+    supplyBots.shift()
+    supplyBirthBar.shift()
+    supplyTouches.shift()
+    supplyDelta.shift()
+    supplyVolRatio.shift()
+    supplyDepartVel.shift()
+    supplyIsFlip.shift()
+
+while demandBoxes.size() > maxZones
+    box.delete(demandBoxes.shift())
+    demandTops.shift()
+    demandBots.shift()
+    demandBirthBar.shift()
+    demandTouches.shift()
+    demandDelta.shift()
+    demandVolRatio.shift()
+    demandDepartVel.shift()
+    demandIsFlip.shift()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ SIGNAL GENERATION ══════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Bull signal: price touches demand zone with strength + bullish confirmation
+bullSigRaw = showSignals and demandTouch and
+  bullBar and
+  bestDemandScore >= minZoneScore
+
+bearSigRaw = showSignals and supplyTouch and
+  bearBar and
+  bestSupplyScore >= minZoneScore
+
+bullCoolOK = bar_index - lastBullSigBar >= sigCooldown
+bearCoolOK = bar_index - lastBearSigBar >= sigCooldown
+
+bullSignal = bullSigRaw and bullCoolOK
+bearSignal = bearSigRaw and bearCoolOK
+
+if bullSignal
+    lastBullSigBar := bar_index
+if bearSignal
+    lastBearSigBar := bar_index
+
+// Signal labels
+if bullSignal
+    tier = bestDemandScore >= 75 ? "S" :
+      bestDemandScore >= 55 ? "A" : "B"
+    sigText = "▲ " + tier + " DEMAND (" + str.tostring(bestDemandScore, "#") + "%)"
+    bgClr = bestDemandScore >= 75 ? color.new(colBullBright, 0) :
+      bestDemandScore >= 55 ? color.new(colBullPrimary, 0) :
+      color.new(colBullDim, 0)
+
+    label.new(bar_index, low,
+      text=sigText,
+      yloc=yloc.belowbar,
+      color=bgClr,
+      textcolor=color.new(#111111, 0),
+      size=labelSize,
+      style=label.style_label_up)
+
+    // RR projection
+    if showRR and not na(nearestSupplyBot)
+        float entry = close
+        float stopDist = entry - nearestDemandTop + atrVal * 0.5
+        float target = nearestSupplyBot
+        float reward = target - entry
+        float rr = stopDist > 0 ? reward / stopDist : 0
+        if rr > 0
+            line.new(bar_index, entry, bar_index + 15, target,
+              color=color.new(colBullPrimary, 40),
+              style=line.style_dotted, width=1)
+            label.new(bar_index + 15, target,
+              "TP  " + str.tostring(rr, "#.#") + "R",
+              style=label.style_label_left,
+              color=color.new(colBullPrimary, 80),
+              textcolor=colBullPrimary,
+              size=size.tiny)
+
+if bearSignal
+    tier = bestSupplyScore >= 75 ? "S" :
+      bestSupplyScore >= 55 ? "A" : "B"
+    sigText = "▼ " + tier + " SUPPLY (" + str.tostring(bestSupplyScore, "#") + "%)"
+    bgClr = bestSupplyScore >= 75 ? color.new(colBearBright, 0) :
+      bestSupplyScore >= 55 ? color.new(colBearPrimary, 0) :
+      color.new(colBearDim, 0)
+
+    label.new(bar_index, high,
+      text=sigText,
+      yloc=yloc.abovebar,
+      color=bgClr,
+      textcolor=#ffffff,
+      size=labelSize,
+      style=label.style_label_down)
+
+    // RR projection
+    if showRR and not na(nearestDemandTop)
+        float entry = close
+        float stopDist = nearestSupplyBot - entry + atrVal * 0.5
+        float target = nearestDemandTop
+        float reward = entry - target
+        float rr = stopDist > 0 ? reward / stopDist : 0
+        if rr > 0
+            line.new(bar_index, entry, bar_index + 15, target,
+              color=color.new(colBearPrimary, 40),
+              style=line.style_dotted, width=1)
+            label.new(bar_index + 15, target,
+              "TP  " + str.tostring(rr, "#.#") + "R",
+              style=label.style_label_left,
+              color=color.new(colBearPrimary, 80),
+              textcolor=colBearPrimary,
+              size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ PROXIMITY WARNINGS ═════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var label proxLbl = na
+
+if showProximity and barstate.islast
+    label.delete(proxLbl)
+
+    float proxDist = atrVal * proximityATR
+    string proxText = ""
+
+    // Check proximity to supply zones
+    if supplyBoxes.size() > 0
+        for i = 0 to supplyBoxes.size() - 1
+            float sBot = supplyBots.get(i)
+            if close < sBot and sBot - close <= proxDist
+                float distPct = (sBot - close) / close * 100
+                proxText := "⚠ SUPPLY " + str.tostring(distPct, "#.##") + "% above"
+                break
+
+    // Check proximity to demand zones
+    if demandBoxes.size() > 0 and proxText == ""
+        for i = 0 to demandBoxes.size() - 1
+            float dTop = demandTops.get(i)
+            if close > dTop and close - dTop <= proxDist
+                float distPct = (close - dTop) / close * 100
+                proxText := "⚠ DEMAND " + str.tostring(distPct, "#.##") + "% below"
+                break
+
+    if proxText != ""
+        proxLbl := label.new(bar_index + 3, close,
+          proxText,
+          style=label.style_label_left,
+          color=color.new(colProximity, 75),
+          textcolor=colProximity,
+          size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ EMAs ═════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+plot(showEMAs ? emaFast : na, title="EMA Fast",
+  color=color.new(colBullPrimary, 60), linewidth=1)
+plot(showEMAs ? emaSlow : na, title="EMA Slow",
+  color=color.new(colNeutral, 40), linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ DASHBOARD ════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table dash = na
+if showDash
+    dash := table.new(getDashPos(dashPos), 2, 22,
+      bgcolor=color.new(colDashBg, 0),
+      border_width=1,
+      border_color=color.new(colNeutral, 70),
+      frame_width=2,
+      frame_color=color.new(colBullPrimary, 60))
+
+if showDash and barstate.islast
+
+    color secBg = color.new(#222222, 0)
+
+    // ── HEADER ────────────────────────────────────────────────────
+    table.cell(dash, 0, 0, "AlphaX  O R D E R  B L O C K S",
+      text_color=colBullPrimary, text_size=dashTextSize,
+      bgcolor=color.new(#111111, 0), text_halign=text.align_center)
+    table.cell(dash, 1, 0, "ENGINE",
+      text_color=color.new(colBullDim, 0), text_size=size.tiny,
+      bgcolor=color.new(#111111, 0), text_halign=text.align_center)
+
+    // ── ZONE INVENTORY ────────────────────────────────────────────
+    table.cell(dash, 0, 1, "─── ZONE INVENTORY ───",
+      text_color=color.new(colNeutral, 20), text_size=size.tiny,
+      bgcolor=secBg, text_halign=text.align_center)
+    table.cell(dash, 1, 1, "",
+      bgcolor=secBg)
+
+    // Supply count
+    int freshSupply = 0
+    int testedSupply = 0
+    int weakSupply = 0
+    int flipSupplyCount = 0
+    if supplyTouches.size() > 0
+        for i = 0 to supplyTouches.size() - 1
+            int t = supplyTouches.get(i)
+            if t == 0
+                freshSupply += 1
+            else if t < maxTouches
+                testedSupply += 1
+            else
+                weakSupply += 1
+            if supplyIsFlip.get(i)
+                flipSupplyCount += 1
+
+    table.cell(dash, 0, 2, "SUPPLY ZONES",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 2, str.tostring(supplyBoxes.size()) +
+      "  (F:" + str.tostring(freshSupply) +
+      " T:" + str.tostring(testedSupply) +
+      " W:" + str.tostring(weakSupply) + ")",
+      text_color=colBearPrimary, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // Demand count
+    int freshDemand = 0
+    int testedDemand = 0
+    int weakDemand = 0
+    int flipDemandCount = 0
+    if demandTouches.size() > 0
+        for i = 0 to demandTouches.size() - 1
+            int t = demandTouches.get(i)
+            if t == 0
+                freshDemand += 1
+            else if t < maxTouches
+                testedDemand += 1
+            else
+                weakDemand += 1
+            if demandIsFlip.get(i)
+                flipDemandCount += 1
+
+    table.cell(dash, 0, 3, "DEMAND ZONES",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 3, str.tostring(demandBoxes.size()) +
+      "  (F:" + str.tostring(freshDemand) +
+      " T:" + str.tostring(testedDemand) +
+      " W:" + str.tostring(weakDemand) + ")",
+      text_color=colBullPrimary, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // Flip zones
+    totalFlip = flipSupplyCount + flipDemandCount
+    table.cell(dash, 0, 4, "FLIP ZONES",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 4, str.tostring(totalFlip),
+      text_color=totalFlip > 0 ? colFlipZone : colNeutral, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // ── MARKET BIAS ───────────────────────────────────────────────
+    table.cell(dash, 0, 5, "─── MARKET BIAS ───",
+      text_color=color.new(colNeutral, 20), text_size=size.tiny,
+      bgcolor=secBg, text_halign=text.align_center)
+    table.cell(dash, 1, 5, "",
+      bgcolor=secBg)
+
+    // Zone bias
+    float supplyWeight = 0.0
+    float demandWeight = 0.0
+    if supplyBoxes.size() > 0
+        for i = 0 to supplyBoxes.size() - 1
+            supplyWeight += calcZoneStrength(supplyTouches.get(i), supplyVolRatio.get(i),
+              supplyDepartVel.get(i), supplyBirthBar.get(i), supplyIsFlip.get(i), false)
+    if demandBoxes.size() > 0
+        for i = 0 to demandBoxes.size() - 1
+            demandWeight += calcZoneStrength(demandTouches.get(i), demandVolRatio.get(i),
+              demandDepartVel.get(i), demandBirthBar.get(i), demandIsFlip.get(i), true)
+
+    float totalWeight = supplyWeight + demandWeight
+    float demandBias = totalWeight > 0 ? demandWeight / totalWeight * 100 : 50
+
+    string biasText = demandBias > 65 ? "▲ DEMAND HEAVY" :
+      demandBias > 55 ? "▲ DEMAND LEAN" :
+      demandBias < 35 ? "▼ SUPPLY HEAVY" :
+      demandBias < 45 ? "▼ SUPPLY LEAN" : "— BALANCED"
+    color biasClr = demandBias > 60 ? colBullPrimary :
+      demandBias < 40 ? colBearPrimary : colNeutralLight
+    color biasBg = demandBias > 60 ? color.new(colBullPrimary, 88) :
+      demandBias < 40 ? color.new(colBearPrimary, 88) : color.new(colDashBg, 0)
+
+    table.cell(dash, 0, 6, "ZONE BIAS",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=biasBg)
+    table.cell(dash, 1, 6, biasText + "  (" + str.tostring(demandBias, "#") + "% D)",
+      text_color=biasClr, text_size=dashTextSize,
+      bgcolor=biasBg)
+
+    // EMA trend
+    emaText = emaFast > emaSlow and close > emaFast ? "▲ STRONG BULL" :
+      emaFast > emaSlow ? "▲ BULL" :
+      emaFast < emaSlow and close < emaFast ? "▼ STRONG BEAR" :
+      emaFast < emaSlow ? "▼ BEAR" : "— CROSS"
+    emaClr = emaFast > emaSlow ? colBullPrimary :
+      emaFast < emaSlow ? colBearPrimary : colNeutralLight
+    table.cell(dash, 0, 7, "EMA TREND",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 7, emaText,
+      text_color=emaClr, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // RSI
+    rsiZone = rsiVal > 70 ? "OB" : rsiVal < 30 ? "OS" :
+      rsiVal > 60 ? "HIGH" : rsiVal < 40 ? "LOW" : "MID"
+    rsiClr = rsiVal > 70 ? colBearPrimary :
+      rsiVal < 30 ? colBullPrimary : colNeutralLight
+    table.cell(dash, 0, 8, "RSI (" + str.tostring(14) + ")",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 8, str.tostring(rsiVal, "#.#") + "  [" + rsiZone + "]",
+      text_color=rsiClr, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // ── NEAREST ZONES ─────────────────────────────────────────────
+    table.cell(dash, 0, 9, "─── NEAREST ZONES ───",
+      text_color=color.new(colNeutral, 20), text_size=size.tiny,
+      bgcolor=secBg, text_halign=text.align_center)
+    table.cell(dash, 1, 9, "",
+      bgcolor=secBg)
+
+    // Nearest supply above
+    float nearSupAbove = na
+    float nearSupScore = na
+    if supplyBoxes.size() > 0
+        for i = 0 to supplyBoxes.size() - 1
+            float sBot = supplyBots.get(i)
+            if sBot > close
+                if na(nearSupAbove) or sBot < nearSupAbove
+                    nearSupAbove := sBot
+                    nearSupScore := calcZoneStrength(supplyTouches.get(i), supplyVolRatio.get(i),
+                      supplyDepartVel.get(i), supplyBirthBar.get(i), supplyIsFlip.get(i), false)
+
+    string nsText = not na(nearSupAbove) ?
+      str.tostring(nearSupAbove, format.mintick) + "  (" + str.tostring(nearSupScore, "#") + "%)" : "— NONE"
+    float nsDist = not na(nearSupAbove) ? (nearSupAbove - close) / close * 100 : na
+    string nsDistText = not na(nsDist) ? "  [" + str.tostring(nsDist, "#.##") + "%]" : ""
+
+    table.cell(dash, 0, 10, "SUPPLY ABOVE",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 10, nsText + nsDistText,
+      text_color=not na(nearSupAbove) ? colBearPrimary : colNeutral,
+      text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // Nearest demand below
+    float nearDemBelow = na
+    float nearDemScore = na
+    if demandBoxes.size() > 0
+        for i = 0 to demandBoxes.size() - 1
+            float dTop = demandTops.get(i)
+            if dTop < close
+                if na(nearDemBelow) or dTop > nearDemBelow
+                    nearDemBelow := dTop
+                    nearDemScore := calcZoneStrength(demandTouches.get(i), demandVolRatio.get(i),
+                      demandDepartVel.get(i), demandBirthBar.get(i), demandIsFlip.get(i), true)
+
+    string ndText = not na(nearDemBelow) ?
+      str.tostring(nearDemBelow, format.mintick) + "  (" + str.tostring(nearDemScore, "#") + "%)" : "— NONE"
+    float ndDist = not na(nearDemBelow) ? (close - nearDemBelow) / close * 100 : na
+    string ndDistText = not na(ndDist) ? "  [" + str.tostring(ndDist, "#.##") + "%]" : ""
+
+    table.cell(dash, 0, 11, "DEMAND BELOW",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 11, ndText + ndDistText,
+      text_color=not na(nearDemBelow) ? colBullPrimary : colNeutral,
+      text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // Price position
+    string posText = not na(nearSupAbove) and not na(nearDemBelow) ?
+      (not na(nsDist) and not na(ndDist) ?
+        (nsDist < ndDist ? "⚠ CLOSER TO SUPPLY" : "⚠ CLOSER TO DEMAND") : "—") : "—"
+    color posClr = not na(nsDist) and not na(ndDist) ?
+      (nsDist < ndDist ? colBearPrimary : colBullPrimary) : colNeutral
+
+    table.cell(dash, 0, 12, "POSITION",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 12, posText,
+      text_color=posClr, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // ── SIGNAL STATUS ─────────────────────────────────────────────
+    table.cell(dash, 0, 13, "─── SIGNAL STATUS ───",
+      text_color=color.new(colNeutral, 20), text_size=size.tiny,
+      bgcolor=secBg, text_halign=text.align_center)
+    table.cell(dash, 1, 13, "",
+      bgcolor=secBg)
+
+    // Last signal
+    int barsSinceBull = bar_index - lastBullSigBar
+    int barsSinceBear = bar_index - lastBearSigBar
+    string lastSigText = barsSinceBull < barsSinceBear ?
+      "▲ DEMAND  (" + str.tostring(barsSinceBull) + " bars ago)" :
+      barsSinceBear < 999 ?
+      "▼ SUPPLY  (" + str.tostring(barsSinceBear) + " bars ago)" : "— NONE"
+    color lastSigClr = barsSinceBull < barsSinceBear ? colBullPrimary :
+      barsSinceBear < 999 ? colBearPrimary : colNeutral
+
+    table.cell(dash, 0, 14, "LAST SIGNAL",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 14, lastSigText,
+      text_color=lastSigClr, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    // Volume status
+    float volRatCur = volSMA > 0 ? volume / volSMA : 1.0
+    string volText = volRatCur > 2.5 ? "SPIKE" :
+      volRatCur > 1.5 ? "HIGH" :
+      volRatCur > 0.8 ? "NORMAL" : "DRY"
+    color volClr = volRatCur > 2.5 ? colBullBright :
+      volRatCur > 1.5 ? colBullPrimary :
+      volRatCur > 0.8 ? colNeutralLight : colNeutral
+
+    table.cell(dash, 0, 15, "VOLUME",
+      text_color=colTextLight, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 15, volText + "  ×" + str.tostring(volRatCur, "#.##"),
+      text_color=volClr, text_size=dashTextSize,
+      bgcolor=color.new(colDashBg, 0))
+
+    table.cell(dash, 0, 16, "─── SESSIONS ───",
+      text_color=color.new(colNeutral, 20), text_size=size.tiny,
+      bgcolor=secBg, text_halign=text.align_center)
+    table.cell(dash, 1, 16, "",
+      bgcolor=secBg)
+
+    color asiaTc = sessionsShowInput and inAsia ? asiaColorInput : colTextLight
+    color londonTc = sessionsShowInput and inLondon ? londonColorInput : colTextLight
+    color nyTc = sessionsShowInput and inNY ? nyColorInput : colTextLight
+
+    table.cell(dash, 0, 17, "ASIA (" + sessionsTz + ")", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 17, sessionsShowInput and asiaShowInput ? (asiaNameInput + "  " + asiaRange) : "OFF", text_color=asiaTc, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 0, 18, "LONDON (" + sessionsTz + ")", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 18, sessionsShowInput and londonShowInput ? (londonNameInput + "  " + londonRange) : "OFF", text_color=londonTc, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 0, 19, "NEW YORK (" + sessionsTz + ")", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 19, sessionsShowInput and nyShowInput ? (nyNameInput + "  " + nyRange) : "OFF", text_color=nyTc, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+
+    table.cell(dash, 0, 20, "SMC TREND", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 20, smcTrendText, text_color=smcTrendClr, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 0, 21, "BOS/CHoCH", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+    table.cell(dash, 1, 21, smcShowInput ? smcLastEvent : "OFF", text_color=colTextLight, text_size=dashTextSize, bgcolor=color.new(colDashBg, 0))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════ ALERTS ════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Zone detection
+alertcondition(supplyConsec and extraVol[1] and (bar_index - lastSupplyBar >= zoneCooldown),
+  title="New Supply Zone Detected",
+  message="[AlphaX OB] New SUPPLY zone detected — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(demandConsec and extraVol[1] and (bar_index - lastDemandBar >= zoneCooldown),
+  title="New Demand Zone Detected",
+  message="[AlphaX OB] New DEMAND zone detected — {{ticker}} {{interval}} @ {{close}}")
+
+// Zone touches
+alertcondition(supplyTouch,
+  title="Supply Zone Touched",
+  message="[AlphaX OB] Supply zone TOUCHED — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(demandTouch,
+  title="Demand Zone Touched",
+  message="[AlphaX OB] Demand zone TOUCHED — {{ticker}} {{interval}} @ {{close}}")
+
+// Signals
+alertcondition(bullSignal and bestDemandScore >= 75,
+  title="S-Tier Demand Signal",
+  message="[AlphaX OB] S-TIER DEMAND signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bullSignal and bestDemandScore >= 55 and bestDemandScore < 75,
+  title="A-Tier Demand Signal",
+  message="[AlphaX OB] A-TIER DEMAND signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bullSignal and bestDemandScore < 55,
+  title="B-Tier Demand Signal",
+  message="[AlphaX OB] B-TIER DEMAND signal — {{ticker}} {{interval}} @ {{close}}")
+
+alertcondition(bearSignal and bestSupplyScore >= 75,
+  title="S-Tier Supply Signal",
+  message="[AlphaX OB] S-TIER SUPPLY signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bearSignal and bestSupplyScore >= 55 and bestSupplyScore < 75,
+  title="A-Tier Supply Signal",
+  message="[AlphaX OB] A-TIER SUPPLY signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bearSignal and bestSupplyScore < 55,
+  title="B-Tier Supply Signal",
+  message="[AlphaX OB] B-TIER SUPPLY signal — {{ticker}} {{interval}} @ {{close}}")
+
+// Combined
+alertcondition(bullSignal,
+  title="Any Demand Signal",
+  message="[AlphaX OB] DEMAND signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bearSignal,
+  title="Any Supply Signal",
+  message="[AlphaX OB] SUPPLY signal — {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bullSignal or bearSignal,
+  title="Any Zone Signal",
+  message="[AlphaX OB] Zone signal — {{ticker}} {{interval}} @ {{close}}")

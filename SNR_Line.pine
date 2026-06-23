@@ -1,0 +1,1520 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+//
+
+//@version=6
+indicator('SNR Sessions + Smart Money', overlay = true, max_labels_count = 500, max_lines_count = 300, calc_bars_count = 500, max_polylines_count = 100)
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+
+// Group: Core Settings
+var string G_CORE = "Core Settings"
+source        = input.source(hl2, 'Source', group = G_CORE, tooltip = 'The price data used to calculate the SNR anchor channel.')
+length        = input.int(200, 'SNR Period', 2, group = G_CORE, tooltip = 'The number of bars back used to calculate the SNR anchor channel.')
+
+// Group: SNR Channel Settings
+var string G_GRID = "SNR Channel Settings"
+num_bins      = input.int(20, 'Outer Band Width', 5, group = G_GRID, tooltip = 'Controls how far the outer SNR bands sit from the anchor line.')
+showLiveSnr   = input.bool(true, "Show Live SNR Levels", group = G_GRID, tooltip = "Plots the live SNR basis and outer levels across the chart for clearer reading.")
+
+// Group: Trend Colors & POC Settings
+var string G_COLOR = "POC Settings"
+showPoc       = input.bool(true, "Show POC Line", inline = "poc_cfg", group = G_COLOR, tooltip = 'Toggle to show or hide the SNR Point of Control proxy line.')
+pocColor      = input.color(color.rgb(255, 166, 0), "", inline = "poc_cfg", group = G_COLOR, tooltip = 'Color assigned to the Point of Control (highest volume zone) line.')
+pocWidth      = input.int(2, "", minval = 1, maxval = 10, inline = "poc_cfg", group = G_COLOR, tooltip = 'Line thickness/width for the full-width Point of Control line.')
+
+// Group: Style & UI Settings
+var string G_STYLE = "Style & UI Settings"
+cleanVisualMode = input.bool(true, "Clean Visual Mode", group = G_STYLE, tooltip = "Removes background fills and hides less important visual marks for a cleaner chart.")
+showPaPlaybook = input.bool(true, "Show PA Playbook", group = G_STYLE, tooltip = "Shows the current Price Action signal, bias and reason in the dashboard.")
+baseStyle_    = input.string("Dashed", "Baseline Style", ["Solid", "Dashed", "Dotted"], group = G_STYLE, tooltip = 'Line style for the central trend baseline.')
+gridStyle_    = input.string("Dotted", "Grid Lines Style", ["Solid", "Dashed", "Dotted"], group = G_STYLE, tooltip = 'Line style for the upper and lower boundary channels.')
+pocStyle_     = input.string("Solid", "POC Line Style", ["Solid", "Dashed", "Dotted"], group = G_STYLE, tooltip = 'Line style for the full-width Point of Control line.')
+dashSize_     = input.string("Normal", "Dashboard Size", ["Auto", "Small", "Normal", "Large"], group = G_STYLE, tooltip = 'Changes the visual size of the information dashboard text and cell boundaries.')
+dashModeInput = input.string("Minimal", "Dashboard Mode", ["Minimal", "Full"], group = G_STYLE, tooltip = 'Minimal keeps only the key entry context. Full shows the full analytics dashboard.')
+
+// Group: AI Integration
+var string G_AI = "AI Integration"
+showAiPanel       = input.bool(false, "Show AI Panel", group = G_AI)
+aiPanelMode       = input.string("Compact", "AI Panel Mode", ["Compact", "Verbose"], group = G_AI)
+useAiBiasFilter   = input.bool(false, "Use AI Bias Filter", group = G_AI)
+aiMinConfidence   = input.float(60.0, "AI Min Confidence %", minval = 0.0, maxval = 100.0, step = 1.0, group = G_AI)
+aiDirectionInput  = input.string("Neutral", "AI Direction", ["Neutral", "Bullish", "Bearish"], group = G_AI)
+aiProbabilityPct  = input.float(0.0, "AI Large Move %", minval = 0.0, maxval = 100.0, step = 0.1, group = G_AI)
+aiConfidencePct   = input.float(0.0, "AI Direction %", minval = 0.0, maxval = 100.0, step = 0.1, group = G_AI)
+aiSessionInput    = input.string("No Session", "AI Session", ["No Session", "Asia", "London", "New York", "London KZ", "NY KZ", "Silver"], group = G_AI)
+aiEntryInput      = input.string("Wait", "AI Entry State", ["Wait", "Long", "Short", "SNR Long", "SNR Short", "FVG Long", "FVG Short"], group = G_AI)
+aiNotesInput      = input.string("", "AI Notes", group = G_AI)
+useAiBridgePayload = input.bool(true, "Use AI Bridge Payload", group = G_AI, tooltip = "Uses one compact payload exported by btc_impulse_ai instead of manually filling all AI fields.")
+aiBridgePayloadInput = input.string("", "AI Bridge Payload", group = G_AI, tooltip = "Paste the contents of outputs/tradingview_ai_bridge.txt or pine_bridge_payload from indicator_snapshot.json.")
+
+// Group: Sessions & Kill Zones
+var string G_SESS = "Sessions & Kill Zones"
+showSessions   = input.bool(true, "Show Sessions", group = G_SESS)
+showKillzones  = input.bool(true, "Show Kill Zones", group = G_SESS)
+showSessionLbl = input.bool(true, "Show Session Labels", group = G_SESS)
+softSessionVisuals = input.bool(true, "Soft Session Visuals", group = G_SESS, tooltip = "Makes session and kill zone boxes lighter so they do not distract from price action.")
+sessionMarks   = input.int(18, "Max Session Boxes", minval = 3, maxval = 80, group = G_SESS)
+sessionBoxOpacity = input.int(88, "Session Box Opacity", minval = 70, maxval = 98, group = G_SESS)
+asiaSession    = input.session("0000-0900", "Asia Session", group = G_SESS)
+londonSession  = input.session("1600-0100", "London Session", group = G_SESS)
+nySession      = input.session("2100-0600", "New York Session", group = G_SESS)
+londonKz       = input.session("1600-1900", "London Kill Zone", group = G_SESS)
+nyKz           = input.session("2100-0000", "New York Kill Zone", group = G_SESS)
+silverKz       = input.session("2300-0000", "Silver Bullet", group = G_SESS)
+
+// Group: Smart Money Concepts
+var string G_SMC = "Smart Money Concepts"
+showStructure = input.bool(true, "Show BOS / CHoCH", group = G_SMC)
+showSweeps    = input.bool(true, "Show Liquidity Sweeps", group = G_SMC)
+showPdEq      = input.bool(true, "Show Premium / Discount EQ", group = G_SMC)
+showFvg       = input.bool(true, "Show FVG", group = G_SMC)
+fvgKzOnly     = input.bool(true, "Only FVG In Kill Zone", group = G_SMC)
+fvgUnmitigatedOnly = input.bool(true, "Only Unmitigated FVG", group = G_SMC)
+fvgMinAtr     = input.float(0.15, "Min FVG Size (ATR)", minval = 0.05, maxval = 1.0, step = 0.05, group = G_SMC)
+fvgExtendBars = input.int(10, "FVG Extend Bars", minval = 2, maxval = 40, group = G_SMC)
+fvgMaxBoxes   = input.int(8, "Max FVG Boxes", minval = 2, maxval = 20, group = G_SMC)
+showBosLabels = input.bool(true, "Show BOS Labels", group = G_SMC)
+showChochLabels = input.bool(true, "Show CHoCH Labels", group = G_SMC)
+showSweepLabels = input.bool(true, "Show Sweep Labels", group = G_SMC)
+smcPivotLen   = input.int(5, "Swing Pivot Length", minval = 2, maxval = 20, group = G_SMC)
+smcMarks      = input.int(18, "Max Structure Marks", minval = 4, maxval = 60, group = G_SMC)
+
+// Group: SNR Entry Logic
+var string G_ENTRY = "SNR Entry Logic"
+showEntrySignals = input.bool(true, "Show Entry Signals", group = G_ENTRY)
+showEntryLabels  = input.bool(false, "Show Entry Labels", group = G_ENTRY)
+showSnrMarks     = input.bool(false, "Show SNR Reclaim Marks", group = G_ENTRY)
+showSnrFill      = input.bool(false, "Show SNR Channel Fill", group = G_ENTRY)
+entryUseKz       = input.bool(true, "Require Kill Zone", group = G_ENTRY)
+kzPrecisionMode  = input.bool(true, "KZ Precision Mode", group = G_ENTRY)
+usePriceActionFilter = input.bool(true, "Use Price Action", group = G_ENTRY)
+paCoreMode      = input.bool(false, "PA + SNR + KZ Only", group = G_ENTRY)
+snrTouchAtrMult  = input.float(0.35, "SNR Touch ATR", minval = 0.1, maxval = 1.5, step = 0.05, group = G_ENTRY)
+entryScoreMin    = input.int(4, "Min Confluence Score", minval = 2, maxval = 5, group = G_ENTRY)
+kzEntryScoreMin  = input.int(6, "KZ Entry Score", minval = 3, maxval = 11, group = G_ENTRY)
+entryLookback    = input.int(12, "Structure Lookback Bars", minval = 2, maxval = 50, group = G_ENTRY)
+entryLabelLimit  = input.int(12, "Max Entry Labels", minval = 2, maxval = 50, group = G_ENTRY)
+
+// Group: Overbought / Oversold
+var string G_OBOS = "Overbought / Oversold"
+showObOsBand   = input.bool(false, "Show OB / OS Bands", group = G_OBOS)
+showObOsMarks  = input.bool(false, "Show OB / OS Marks", group = G_OBOS)
+filterEntriesByObOs = input.bool(true, "Filter Entries By OB / OS", group = G_OBOS)
+useObOsScore   = input.bool(true, "Use OB / OS In Score", group = G_OBOS)
+obosRsiLength  = input.int(14, "RSI Length", minval = 2, maxval = 50, group = G_OBOS)
+obosUpperRsi   = input.int(70, "Overbought RSI", minval = 50, maxval = 95, group = G_OBOS)
+obosLowerRsi   = input.int(30, "Oversold RSI", minval = 5, maxval = 50, group = G_OBOS)
+obosBandFactor = input.float(1.8, "Band Start (SD)", minval = 0.5, maxval = 3.0, step = 0.1, group = G_OBOS)
+
+// Group: Flow Context
+var string G_FLOW = "Flow Context"
+useFlowFilter      = input.bool(true, "Use Flow Filter", group = G_FLOW)
+showFlowDashboard  = input.bool(false, "Show Flow In Dashboard", group = G_FLOW)
+flowLenInput       = input.int(24, "Flow Sensitivity", minval = 5, group = G_FLOW)
+spectralLenInput   = input.int(10, "Flow Smoothing", minval = 1, group = G_FLOW)
+boostInput         = input.float(1.5, "Flow Boost", minval = 1.0, maxval = 5.0, step = 0.1, group = G_FLOW)
+thresholdInput     = input.float(15.0, "Flow Threshold", minval = 0.0, maxval = 50.0, group = G_FLOW)
+
+// Group: Market Architecture
+var string G_ARCH = "Market Architecture"
+useArchitectureFilter = input.bool(true, "Use Architecture Filter", group = G_ARCH)
+showArchitectureDash  = input.bool(false, "Show Architecture In Dashboard", group = G_ARCH)
+autoSensitivity       = input.bool(true, "Auto Sensitivity", group = G_ARCH)
+structureSensitivity  = input.int(5, "Structure Sensitivity", minval = 1, maxval = 10, group = G_ARCH)
+architectureTermInput = input.string("Auto", "Architecture Term", options = ["Auto", "LT", "MT", "ST", "None"], group = G_ARCH)
+knnKInput             = input.int(5, "kNN Neighbors", minval = 1, maxval = 20, group = G_ARCH)
+minConfidence         = input.float(0.4, "kNN Confidence", minval = 0.0, maxval = 1.0, step = 0.1, group = G_ARCH)
+
+dashRows = dashModeInput == "Minimal" ? 10 : 18 + (showAiPanel ? 1 : 0)
+
+// Helper function to map text selections to native line style properties
+getLineStyle(styleText) =>
+    switch styleText
+        "Solid"  => line.style_solid
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+        => line.style_solid
+
+// Helper function to map text selections to native table text sizes
+getDashSize(sizeText) =>
+    switch sizeText
+        "Auto"   => size.auto
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        => size.normal
+
+string baseStyle = getLineStyle(baseStyle_)
+string gridStyle = getLineStyle(gridStyle_)
+string pocStyle  = getLineStyle(pocStyle_)
+string dashSize  = getDashSize(dashSize_)
+string TZ_KST    = "Asia/Seoul"
+
+colAsia      = color.new(color.rgb(51, 153, 255), 80)
+colLondon    = color.new(color.rgb(0, 163, 108), 80)
+colNewYork   = color.new(color.rgb(210, 68, 90), 80)
+colSilver    = color.new(color.rgb(180, 140, 255), 75)
+colBullBos   = color.rgb(48, 176, 112)
+colBearBos   = color.rgb(201, 77, 83)
+colBullChoch = color.rgb(38, 208, 178)
+colBearChoch = color.rgb(232, 111, 51)
+colBullSweep = color.rgb(0, 200, 140)
+colBearSweep = color.rgb(255, 120, 70)
+colBullFvg = color.rgb(66, 196, 150)
+colBearFvg = color.rgb(214, 96, 96)
+colLongEntry = color.rgb(0, 214, 143)
+colShortEntry = color.rgb(255, 87, 87)
+colSbEntry = color.rgb(190, 120, 255)
+colSnrBasis = color.rgb(184, 194, 214)
+colSnrEdge = color.rgb(156, 166, 189)
+colSnrFill = color.rgb(122, 132, 156)
+
+// }
+// ＣＡＬＣＵＬＡＴＩＯＮＳ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+
+buildLinearSnr() =>
+    array<float> preds = array.new_float(0)
+    if barstate.islast
+        float reg_now = ta.linreg(source, length, 0)
+        float reg_prev = ta.linreg(source, length, 1)
+        float reg_slope_step = reg_now - reg_prev
+        float oldest_val = reg_now - reg_slope_step * (length - 1)
+        for i = 0 to length - 1
+            float pred_val = oldest_val + reg_slope_step * i
+            array.push(preds, pred_val)
+    preds
+
+// Calculate baseline SNR anchor
+array<float> predictions = buildLinearSnr()
+
+// Determine 1 Standard Deviation 
+stdev_val = ta.stdev(source, length)
+
+// Scale calculation step sizes so 3 SD boundary matches max outer channel constraint
+dev = (stdev_val * 3) / num_bins
+
+// }
+// ＰＬＯＴ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+
+type ArchPoint
+    float feat1
+    float feat2
+    float score
+
+var polyline[] active_lines = array.new<polyline>()
+var table info_dash = na
+var string dashModePrev = ""
+var int dashRowsPrev = 0
+var box[] session_boxes = array.new<box>()
+var label[] session_labels = array.new<label>()
+var line[] structure_lines = array.new<line>()
+var label[] structure_labels = array.new<label>()
+var label[] entry_labels = array.new<label>()
+var line[] entry_plan_lines = array.new<line>()
+var box[] fvg_boxes = array.new<box>()
+var box[] killzone_boxes = array.new<box>()
+var label[] killzone_labels = array.new<label>()
+var box asia_box = na
+var box london_box = na
+var box ny_box = na
+var box london_kz_box = na
+var box ny_kz_box = na
+var box silver_kz_box = na
+var label asia_label = na
+var label london_label = na
+var label ny_label = na
+var label london_kz_label = na
+var label ny_kz_label = na
+var label silver_kz_label = na
+var int asia_start_idx = na
+var int london_start_idx = na
+var int ny_start_idx = na
+var int london_kz_start_idx = na
+var int ny_kz_start_idx = na
+var int silver_kz_start_idx = na
+var float asia_hi = na
+var float asia_lo = na
+var float london_hi = na
+var float london_lo = na
+var float ny_hi = na
+var float ny_lo = na
+var float london_kz_hi = na
+var float london_kz_lo = na
+var float ny_kz_hi = na
+var float ny_kz_lo = na
+var float silver_kz_hi = na
+var float silver_kz_lo = na
+var float swing_high = na
+var float swing_low = na
+var int swing_high_idx = na
+var int swing_low_idx = na
+var float broken_high = na
+var float broken_low = na
+var float lastBullFvgTop = na
+var float lastBullFvgBottom = na
+var float lastBearFvgTop = na
+var float lastBearFvgBottom = na
+var int lastBullFvgBar = na
+var int lastBearFvgBar = na
+var box lastBullFvgBox = na
+var box lastBearFvgBox = na
+var bool bullFvgMitigated = true
+var bool bearFvgMitigated = true
+var int structure_dir = 0
+var int last_bull_break_bar = na
+var int last_bear_break_bar = na
+var int last_snr_bull_break_bar = na
+var int last_snr_bear_break_bar = na
+var float lastSTHigh = na
+var float lastSTLow = na
+var float lastMTHigh = na
+var float lastMTLow = na
+var float lastLTHigh = na
+var float lastLTLow = na
+var archHistorySTHigh = array.new<ArchPoint>()
+var archHistorySTLow = array.new<ArchPoint>()
+var archHistoryMTHigh = array.new<ArchPoint>()
+var archHistoryMTLow = array.new<ArchPoint>()
+var archHistoryLTHigh = array.new<ArchPoint>()
+var archHistoryLTLow = array.new<ArchPoint>()
+
+inSession(sessionText) =>
+    not na(time(timeframe.period, sessionText, TZ_KST))
+
+trimMarks(linesArr, labelsArr, maxCount) =>
+    if array.size(linesArr) > maxCount
+        line.delete(array.shift(linesArr))
+    if array.size(labelsArr) > maxCount
+        label.delete(array.shift(labelsArr))
+
+trimSessionMarks(maxCount) =>
+    if array.size(session_boxes) > maxCount
+        box.delete(array.shift(session_boxes))
+    if array.size(session_labels) > maxCount
+        label.delete(array.shift(session_labels))
+
+trimKillzoneMarks(maxCount) =>
+    if array.size(killzone_boxes) > maxCount
+        box.delete(array.shift(killzone_boxes))
+    if array.size(killzone_labels) > maxCount
+        label.delete(array.shift(killzone_labels))
+
+trimEntryPlanLines(maxCount) =>
+    int maxLines = maxCount * 4
+    while array.size(entry_plan_lines) > maxLines
+        line.delete(array.shift(entry_plan_lines))
+
+trimFvgBoxes(maxCount) =>
+    while array.size(fvg_boxes) > maxCount
+        box.delete(array.shift(fvg_boxes))
+
+getSessionBoxTop(float refHigh) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    refHigh + atr_ref * 0.82
+
+getSessionBoxBottom(float refHigh) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    refHigh + atr_ref * 0.54
+
+getKillzoneBoxTop(float refHigh) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    refHigh + atr_ref * 1.52
+
+getKillzoneBoxBottom(float refHigh) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    refHigh + atr_ref * 1.24
+
+getStructureLabelY(float level, bool isBull) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    level + (isBull ? atr_ref * 0.22 : -atr_ref * 0.22)
+
+getEntryLabelY(bool isLong) =>
+    float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+    isLong ? low - atr_ref * 0.95 : high + atr_ref * 0.95
+
+getMidIndex(int startIdx, int endIdx) =>
+    startIdx + int(math.max(1, math.round((endIdx - startIdx) / 2.0)))
+
+getMidPrice(float hi, float lo) =>
+    (hi + lo) / 2.0
+
+getArrayText(array<string> parts, int idx, string fallback) =>
+    array.size(parts) > idx ? array.get(parts, idx) : fallback
+
+normalizeAiDirection(string rawValue) =>
+    string cleaned = str.lower(str.trim(rawValue))
+    cleaned == "bullish" ? "Bullish" : cleaned == "bearish" ? "Bearish" : "Neutral"
+
+normalizeAiSession(string rawValue) =>
+    string cleaned = str.lower(str.trim(rawValue))
+    cleaned == "asia" ? "Asia" : cleaned == "london" ? "London" : cleaned == "new york" or cleaned == "new_york" ? "New York" : cleaned == "london kz" or cleaned == "london_kz" ? "London KZ" : cleaned == "ny kz" or cleaned == "ny_kz" ? "NY KZ" : cleaned == "silver" ? "Silver" : "No Session"
+
+normalizeAiEntry(string rawValue) =>
+    string cleaned = str.lower(str.trim(rawValue))
+    cleaned == "long" ? "Long" : cleaned == "short" ? "Short" : cleaned == "snr long" or cleaned == "snr_long" or cleaned == "snr_retest_long" or cleaned == "snr_reclaim_long" ? "SNR Long" : cleaned == "snr short" or cleaned == "snr_short" or cleaned == "snr_retest_short" or cleaned == "snr_reject_short" ? "SNR Short" : cleaned == "fvg long" or cleaned == "fvg_long" ? "FVG Long" : cleaned == "fvg short" or cleaned == "fvg_short" ? "FVG Short" : "Wait"
+
+parseAiBridgePayload(string payloadText) =>
+    bool bridgeOk = false
+    string parsedDirection = "Neutral"
+    float parsedProbability = na
+    float parsedConfidence = na
+    string parsedSession = "No Session"
+    string parsedEntry = "Wait"
+    string parsedNotes = ""
+    string parsedPaSignal = ""
+    string parsedPaBias = ""
+    string parsedPaReason = ""
+    if str.length(str.trim(payloadText)) > 0
+        array<string> payloadParts = str.split(payloadText, "|")
+        string header = str.upper(getArrayText(payloadParts, 0, ""))
+        if array.size(payloadParts) >= 6 and header == "AIBRIDGE"
+            bridgeOk := true
+            parsedDirection := normalizeAiDirection(getArrayText(payloadParts, 1, "Neutral"))
+            parsedProbability := float(str.tonumber(getArrayText(payloadParts, 2, "")))
+            parsedConfidence := float(str.tonumber(getArrayText(payloadParts, 3, "")))
+            parsedSession := normalizeAiSession(getArrayText(payloadParts, 4, "No Session"))
+            parsedEntry := normalizeAiEntry(getArrayText(payloadParts, 5, "Wait"))
+            parsedNotes := getArrayText(payloadParts, 6, "")
+            parsedPaSignal := getArrayText(payloadParts, 7, "")
+            parsedPaBias := getArrayText(payloadParts, 8, "")
+            parsedPaReason := getArrayText(payloadParts, 9, "")
+    [bridgeOk, parsedDirection, parsedProbability, parsedConfidence, parsedSession, parsedEntry, parsedNotes, parsedPaSignal, parsedPaBias, parsedPaReason]
+
+getSessionBg(color baseColor) =>
+    int baseOpacity = cleanVisualMode ? math.min(94, sessionBoxOpacity + 3) : sessionBoxOpacity
+    color.new(baseColor, softSessionVisuals ? math.min(96, baseOpacity + 3) : baseOpacity)
+
+getSessionBorder(color baseColor) =>
+    color.new(baseColor, softSessionVisuals ? (cleanVisualMode ? 55 : 38) : cleanVisualMode ? 34 : 20)
+
+getKzBg(color baseColor, bool isSilver, bool isActive) =>
+    int activeBoost = isSilver ? 14 : 8
+    int historyBoost = isSilver ? 8 : 4
+    int zoneOpacity = sessionBoxOpacity - (isActive ? activeBoost : historyBoost)
+    int finalOpacity = math.max(60, math.min(94, zoneOpacity))
+    color.new(baseColor, softSessionVisuals and not isActive ? math.min(96, finalOpacity + 3) : finalOpacity)
+
+getKzBorder(color baseColor, bool isSilver, bool isActive) =>
+    color.new(baseColor, softSessionVisuals ? (isSilver ? (isActive ? 10 : 26) : (isActive ? 18 : 32)) : isSilver ? (isActive ? 2 : 16) : (isActive ? 8 : 24))
+
+getKzLabelBg(color baseColor, bool isSilver) =>
+    color.new(baseColor, softSessionVisuals ? (isSilver ? 24 : 30) : isSilver ? 10 : 18)
+
+asf(float src, int len) =>
+    alpha = 2.0 / (len + 1)
+    diff = ta.atr(len)
+    adaptive_alpha = math.min(1.0, alpha * (math.abs(src - src[1]) / (diff + syminfo.mintick)))
+    float out = 0.0
+    out := na(out[1]) ? src : out[1] + adaptive_alpha * (src - out[1])
+    out
+
+getArchDistance(ArchPoint p, float feat1, float feat2) =>
+    math.abs(p.feat1 - feat1) + math.abs(p.feat2 - feat2)
+
+f_knn_score(float feat1, float feat2, array<ArchPoint> history, int k) =>
+    float score = 0.5
+    histSize = array.size(history)
+    if histSize > k
+        distances = array.new_float()
+        ranks = array.new_int()
+        for i = 0 to histSize - 1
+            point = array.get(history, i)
+            array.push(distances, getArchDistance(point, feat1, feat2))
+            array.push(ranks, i)
+        for i = 0 to k - 1
+            for j = i + 1 to histSize - 1
+                if array.get(distances, array.get(ranks, j)) < array.get(distances, array.get(ranks, i))
+                    temp = array.get(ranks, i)
+                    array.set(ranks, i, array.get(ranks, j))
+                    array.set(ranks, j, temp)
+        float sumScore = 0.0
+        for i = 0 to k - 1
+            sumScore += array.get(history, array.get(ranks, i)).score
+        score := sumScore / k
+    score
+
+f_register_arch_high(float ph, int len, array<ArchPoint> histHigh, float prevHigh, float relAtrSrc, float relVolSrc) =>
+    float nextHigh = prevHigh
+    if not na(ph)
+        highScore = f_knn_score(relAtrSrc[len], relVolSrc[len], histHigh, knnKInput)
+        array.push(histHigh, ArchPoint.new(relAtrSrc[len], relVolSrc[len], 1.0))
+        if array.size(histHigh) > 100
+            array.shift(histHigh)
+        if highScore >= minConfidence
+            nextHigh := ph
+    nextHigh
+
+f_register_arch_low(float pl, int len, array<ArchPoint> histLow, float prevLow, float relAtrSrc, float relVolSrc) =>
+    float nextLow = prevLow
+    if not na(pl)
+        lowScore = f_knn_score(relAtrSrc[len], relVolSrc[len], histLow, knnKInput)
+        array.push(histLow, ArchPoint.new(relAtrSrc[len], relVolSrc[len], 1.0))
+        if array.size(histLow) > 100
+            array.shift(histLow)
+        if lowScore >= minConfidence
+            nextLow := pl
+    nextLow
+
+addStructureMark(startIdx, level, txt, clr, isBull) =>
+    if showStructure and not na(level)
+        structure_line = line.new(startIdx, level, bar_index, level, xloc = xloc.bar_index, color = color.new(clr, 10), width = 2)
+        array.push(structure_lines, structure_line)
+        int labelX = getMidIndex(startIdx, bar_index)
+        float labelY = getStructureLabelY(level, isBull)
+        string markText = str.contains(txt, "CHoCH") ? "CHoCH" : txt == "LQ Sweep" ? "Sweep" : "BOS"
+        bool drawLabel = str.contains(txt, "CHoCH") ? showChochLabels : txt == "LQ Sweep" ? showSweepLabels : showBosLabels
+        if drawLabel
+            structure_label = label.new(labelX, labelY, markText, xloc = xloc.bar_index, yloc = yloc.price, style = isBull ? label.style_label_down : label.style_label_up, color = clr, textcolor = color.white, size = size.tiny)
+            array.push(structure_labels, structure_label)
+        trimMarks(structure_lines, structure_labels, smcMarks)
+
+// Helper function to paint SNR anchor layers
+drawGridLayer(offset_ticks, is_baseline, up_col, dn_col, b_sty, g_sty) =>
+    points = array.new<chart.point>()
+    
+    int pred_size = array.size(predictions)
+    if pred_size > 0
+        for i = 0 to pred_size - 1
+            base_p = array.get(predictions, i)
+            target_p = base_p + offset_ticks
+            points.push(chart.point.from_index(bar_index + i - length + 1, target_p))
+        
+        int width  = is_baseline ? 2 : 1
+        string sty = is_baseline ? b_sty : g_sty
+        color clr  = is_baseline ? (array.get(predictions, pred_size - 1) > array.get(predictions, 0) ? up_col : dn_col) : color.new(chart.fg_color, 90)
+        
+        array.push(active_lines, polyline.new(points, line_width = width, line_style = sty, line_color = is_baseline ? chart.fg_color : clr))
+
+is_asia = inSession(asiaSession)
+is_london = inSession(londonSession)
+is_ny = inSession(nySession)
+is_london_kz = inSession(londonKz)
+is_ny_kz = inSession(nyKz)
+is_silver_kz = inSession(silverKz)
+active_kz = is_london_kz or is_ny_kz or is_silver_kz
+
+[aiBridgeReady, aiBridgeDirection, aiBridgeProbability, aiBridgeConfidence, aiBridgeSession, aiBridgeEntry, aiBridgeNotes, aiBridgePaSignal, aiBridgePaBias, aiBridgePaReason] = parseAiBridgePayload(aiBridgePayloadInput)
+aiBridgeActive = useAiBridgePayload and aiBridgeReady
+aiDirection = aiBridgeActive ? aiBridgeDirection : aiDirectionInput
+aiProbability = aiBridgeActive and not na(aiBridgeProbability) ? aiBridgeProbability : aiProbabilityPct
+aiConfidence = aiBridgeActive and not na(aiBridgeConfidence) ? aiBridgeConfidence : aiConfidencePct
+aiSession = aiBridgeActive ? aiBridgeSession : aiSessionInput
+aiEntry = aiBridgeActive ? aiBridgeEntry : aiEntryInput
+aiNotes = aiBridgeActive ? aiBridgeNotes : aiNotesInput
+
+float fvg_atr = math.max(ta.atr(14), syminfo.mintick * 10)
+bull_fvg = showFvg and bar_index > 2 and low > high[2] and (low - high[2]) >= fvg_atr * fvgMinAtr and (not fvgKzOnly or active_kz)
+bear_fvg = showFvg and bar_index > 2 and high < low[2] and (low[2] - high) >= fvg_atr * fvgMinAtr and (not fvgKzOnly or active_kz)
+
+if not bullFvgMitigated and not na(lastBullFvgBottom) and low <= lastBullFvgBottom
+    bullFvgMitigated := true
+    if not na(lastBullFvgBox)
+        box.set_bgcolor(lastBullFvgBox, color.new(colBullFvg, 94))
+        box.set_border_color(lastBullFvgBox, color.new(colBullFvg, 88))
+        if fvgUnmitigatedOnly
+            box.delete(lastBullFvgBox)
+            lastBullFvgBox := na
+
+if not bearFvgMitigated and not na(lastBearFvgTop) and high >= lastBearFvgTop
+    bearFvgMitigated := true
+    if not na(lastBearFvgBox)
+        box.set_bgcolor(lastBearFvgBox, color.new(colBearFvg, 94))
+        box.set_border_color(lastBearFvgBox, color.new(colBearFvg, 88))
+        if fvgUnmitigatedOnly
+            box.delete(lastBearFvgBox)
+            lastBearFvgBox := na
+
+if bull_fvg
+    lastBullFvgTop := low
+    lastBullFvgBottom := high[2]
+    lastBullFvgBar := bar_index
+    bullFvgMitigated := false
+    bull_fvg_box = box.new(bar_index - 2, lastBullFvgTop, bar_index + fvgExtendBars, lastBullFvgBottom, bgcolor = color.new(colBullFvg, 84), border_color = color.new(colBullFvg, 30))
+    lastBullFvgBox := bull_fvg_box
+    array.push(fvg_boxes, bull_fvg_box)
+    trimFvgBoxes(fvgMaxBoxes)
+
+if bear_fvg
+    lastBearFvgTop := low[2]
+    lastBearFvgBottom := high
+    lastBearFvgBar := bar_index
+    bearFvgMitigated := false
+    bear_fvg_box = box.new(bar_index - 2, lastBearFvgTop, bar_index + fvgExtendBars, lastBearFvgBottom, bgcolor = color.new(colBearFvg, 84), border_color = color.new(colBearFvg, 30))
+    lastBearFvgBox := bear_fvg_box
+    array.push(fvg_boxes, bear_fvg_box)
+    trimFvgBoxes(fvgMaxBoxes)
+
+asia_start = is_asia and not is_asia[1]
+london_start = is_london and not is_london[1]
+ny_start = is_ny and not is_ny[1]
+london_kz_start = is_london_kz and not is_london_kz[1]
+ny_kz_start = is_ny_kz and not is_ny_kz[1]
+silver_kz_start = is_silver_kz and not is_silver_kz[1]
+
+asia_end = not is_asia and is_asia[1]
+london_end = not is_london and is_london[1]
+ny_end = not is_ny and is_ny[1]
+london_kz_end = not is_london_kz and is_london_kz[1]
+ny_kz_end = not is_ny_kz and is_ny_kz[1]
+silver_kz_end = not is_silver_kz and is_silver_kz[1]
+
+if showSessions
+    if asia_start
+        asia_start_idx := bar_index
+        asia_hi := high
+        asia_lo := low
+        asia_box := box.new(bar_index, asia_hi, bar_index, asia_lo, bgcolor = getSessionBg(color.rgb(51, 153, 255)), border_color = getSessionBorder(color.rgb(51, 153, 255)))
+        array.push(session_boxes, asia_box)
+        if showSessionLbl
+            asia_label := label.new(bar_index, getMidPrice(asia_hi, asia_lo), "A", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = color.new(color.rgb(51, 153, 255), 5), textcolor = color.white, size = size.tiny)
+            array.push(session_labels, asia_label)
+        trimSessionMarks(sessionMarks)
+    if is_asia and not na(asia_box)
+        asia_hi := math.max(nz(asia_hi, high), high)
+        asia_lo := math.min(nz(asia_lo, low), low)
+        box.set_right(asia_box, bar_index)
+        box.set_top(asia_box, asia_hi)
+        box.set_bottom(asia_box, asia_lo)
+        if showSessionLbl and not na(asia_label) and not na(asia_start_idx)
+            label.set_x(asia_label, getMidIndex(asia_start_idx, bar_index))
+            label.set_y(asia_label, getMidPrice(asia_hi, asia_lo))
+    if asia_end
+        asia_box := na
+        asia_label := na
+        asia_start_idx := na
+        asia_hi := na
+        asia_lo := na
+
+    if london_start
+        london_start_idx := bar_index
+        london_hi := high
+        london_lo := low
+        london_box := box.new(bar_index, london_hi, bar_index, london_lo, bgcolor = getSessionBg(color.rgb(0, 163, 108)), border_color = getSessionBorder(color.rgb(0, 163, 108)))
+        array.push(session_boxes, london_box)
+        if showSessionLbl
+            london_label := label.new(bar_index, getMidPrice(london_hi, london_lo), "L", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = color.new(color.rgb(0, 163, 108), 5), textcolor = color.white, size = size.tiny)
+            array.push(session_labels, london_label)
+        trimSessionMarks(sessionMarks)
+    if is_london and not na(london_box)
+        london_hi := math.max(nz(london_hi, high), high)
+        london_lo := math.min(nz(london_lo, low), low)
+        box.set_right(london_box, bar_index)
+        box.set_top(london_box, london_hi)
+        box.set_bottom(london_box, london_lo)
+        if showSessionLbl and not na(london_label) and not na(london_start_idx)
+            label.set_x(london_label, getMidIndex(london_start_idx, bar_index))
+            label.set_y(london_label, getMidPrice(london_hi, london_lo))
+    if london_end
+        london_box := na
+        london_label := na
+        london_start_idx := na
+        london_hi := na
+        london_lo := na
+
+    if ny_start
+        ny_start_idx := bar_index
+        ny_hi := high
+        ny_lo := low
+        ny_box := box.new(bar_index, ny_hi, bar_index, ny_lo, bgcolor = getSessionBg(color.rgb(210, 68, 90)), border_color = getSessionBorder(color.rgb(210, 68, 90)))
+        array.push(session_boxes, ny_box)
+        if showSessionLbl
+            ny_label := label.new(bar_index, getMidPrice(ny_hi, ny_lo), "NY", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = color.new(color.rgb(210, 68, 90), 5), textcolor = color.white, size = size.tiny)
+            array.push(session_labels, ny_label)
+        trimSessionMarks(sessionMarks)
+    if is_ny and not na(ny_box)
+        ny_hi := math.max(nz(ny_hi, high), high)
+        ny_lo := math.min(nz(ny_lo, low), low)
+        box.set_right(ny_box, bar_index)
+        box.set_top(ny_box, ny_hi)
+        box.set_bottom(ny_box, ny_lo)
+        if showSessionLbl and not na(ny_label) and not na(ny_start_idx)
+            label.set_x(ny_label, getMidIndex(ny_start_idx, bar_index))
+            label.set_y(ny_label, getMidPrice(ny_hi, ny_lo))
+    if ny_end
+        ny_box := na
+        ny_label := na
+        ny_start_idx := na
+        ny_hi := na
+        ny_lo := na
+
+if showKillzones
+    if london_kz_start
+        london_kz_start_idx := bar_index
+        london_kz_hi := high
+        london_kz_lo := low
+        london_kz_box := box.new(bar_index, london_kz_hi, bar_index, london_kz_lo, bgcolor = getKzBg(colLondon, false, true), border_color = getKzBorder(colLondon, false, true))
+        array.push(killzone_boxes, london_kz_box)
+        london_kz_label := label.new(bar_index, getMidPrice(london_kz_hi, london_kz_lo), "LKZ", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = getKzLabelBg(colLondon, false), textcolor = color.white, size = size.tiny)
+        array.push(killzone_labels, london_kz_label)
+        trimKillzoneMarks(sessionMarks)
+    if is_london_kz and not na(london_kz_box)
+        london_kz_hi := math.max(nz(london_kz_hi, high), high)
+        london_kz_lo := math.min(nz(london_kz_lo, low), low)
+        box.set_right(london_kz_box, bar_index)
+        box.set_top(london_kz_box, london_kz_hi)
+        box.set_bottom(london_kz_box, london_kz_lo)
+        if not na(london_kz_label) and not na(london_kz_start_idx)
+            label.set_x(london_kz_label, getMidIndex(london_kz_start_idx, bar_index))
+            label.set_y(london_kz_label, getMidPrice(london_kz_hi, london_kz_lo))
+    if london_kz_end
+        if not na(london_kz_box)
+            box.set_bgcolor(london_kz_box, getKzBg(colLondon, false, false))
+            box.set_border_color(london_kz_box, getKzBorder(colLondon, false, false))
+        if not na(london_kz_label)
+            label.set_text(london_kz_label, "LKZ")
+            label.set_color(london_kz_label, color.new(colLondon, 14))
+        london_kz_box := na
+        london_kz_label := na
+        london_kz_start_idx := na
+        london_kz_hi := na
+        london_kz_lo := na
+
+    if ny_kz_start
+        ny_kz_start_idx := bar_index
+        ny_kz_hi := high
+        ny_kz_lo := low
+        ny_kz_box := box.new(bar_index, ny_kz_hi, bar_index, ny_kz_lo, bgcolor = getKzBg(colNewYork, false, true), border_color = getKzBorder(colNewYork, false, true))
+        array.push(killzone_boxes, ny_kz_box)
+        ny_kz_label := label.new(bar_index, getMidPrice(ny_kz_hi, ny_kz_lo), "NKZ", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = getKzLabelBg(colNewYork, false), textcolor = color.white, size = size.tiny)
+        array.push(killzone_labels, ny_kz_label)
+        trimKillzoneMarks(sessionMarks)
+    if is_ny_kz and not na(ny_kz_box)
+        ny_kz_hi := math.max(nz(ny_kz_hi, high), high)
+        ny_kz_lo := math.min(nz(ny_kz_lo, low), low)
+        box.set_right(ny_kz_box, bar_index)
+        box.set_top(ny_kz_box, ny_kz_hi)
+        box.set_bottom(ny_kz_box, ny_kz_lo)
+        if not na(ny_kz_label) and not na(ny_kz_start_idx)
+            label.set_x(ny_kz_label, getMidIndex(ny_kz_start_idx, bar_index))
+            label.set_y(ny_kz_label, getMidPrice(ny_kz_hi, ny_kz_lo))
+    if ny_kz_end
+        if not na(ny_kz_box)
+            box.set_bgcolor(ny_kz_box, getKzBg(colNewYork, false, false))
+            box.set_border_color(ny_kz_box, getKzBorder(colNewYork, false, false))
+        if not na(ny_kz_label)
+            label.set_text(ny_kz_label, "NKZ")
+            label.set_color(ny_kz_label, color.new(colNewYork, 14))
+        ny_kz_box := na
+        ny_kz_label := na
+        ny_kz_start_idx := na
+        ny_kz_hi := na
+        ny_kz_lo := na
+
+    if silver_kz_start
+        silver_kz_start_idx := bar_index
+        silver_kz_hi := high
+        silver_kz_lo := low
+        silver_kz_box := box.new(bar_index, silver_kz_hi, bar_index, silver_kz_lo, bgcolor = getKzBg(colSilver, true, true), border_color = getKzBorder(colSilver, true, true))
+        array.push(killzone_boxes, silver_kz_box)
+        silver_kz_label := label.new(bar_index, getMidPrice(silver_kz_hi, silver_kz_lo), "SB", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = getKzLabelBg(colSilver, true), textcolor = color.white, size = size.tiny)
+        array.push(killzone_labels, silver_kz_label)
+        trimKillzoneMarks(sessionMarks)
+    if is_silver_kz and not na(silver_kz_box)
+        silver_kz_hi := math.max(nz(silver_kz_hi, high), high)
+        silver_kz_lo := math.min(nz(silver_kz_lo, low), low)
+        box.set_right(silver_kz_box, bar_index)
+        box.set_top(silver_kz_box, silver_kz_hi)
+        box.set_bottom(silver_kz_box, silver_kz_lo)
+        if not na(silver_kz_label) and not na(silver_kz_start_idx)
+            label.set_x(silver_kz_label, getMidIndex(silver_kz_start_idx, bar_index))
+            label.set_y(silver_kz_label, getMidPrice(silver_kz_hi, silver_kz_lo))
+    if silver_kz_end
+        if not na(silver_kz_box)
+            box.set_bgcolor(silver_kz_box, getKzBg(colSilver, true, false))
+            box.set_border_color(silver_kz_box, getKzBorder(colSilver, true, false))
+        if not na(silver_kz_label)
+            label.set_text(silver_kz_label, "SB")
+            label.set_color(silver_kz_label, color.new(colSilver, 8))
+        silver_kz_box := na
+        silver_kz_label := na
+        silver_kz_start_idx := na
+        silver_kz_hi := na
+        silver_kz_lo := na
+
+atr14 = ta.atr(14)
+relVol = volume / math.max(ta.sma(volume, 100), 1.0)
+relATR = atr14 / math.max(ta.sma(atr14, 100), syminfo.mintick)
+atrSlow = ta.atr(200)
+avgAtrSlow = ta.sma(atrSlow, 200)
+volRatio = atrSlow / math.max(nz(avgAtrSlow, atrSlow), syminfo.mintick)
+dynamicMultiplier = autoSensitivity ? math.pow(nz(ta.ema(volRatio, 50), 1.0), 1.5) : 1.0
+archBaseLen = math.max(2, math.round((11 - structureSensitivity) * dynamicMultiplier))
+stLen = math.max(2, archBaseLen)
+mtLen = math.max(3, stLen * 3)
+ltLen = math.max(5, mtLen * 3)
+structureLen = math.max(2, smcPivotLen)
+
+float pivot_high = ta.pivothigh(high, structureLen, structureLen)
+float pivot_low = ta.pivotlow(low, structureLen, structureLen)
+if not na(pivot_high)
+    swing_high := pivot_high
+    swing_high_idx := bar_index - structureLen
+    broken_high := na
+if not na(pivot_low)
+    swing_low := pivot_low
+    swing_low_idx := bar_index - structureLen
+    broken_low := na
+
+stPH = ta.pivothigh(high, stLen, stLen)
+stPL = ta.pivotlow(low, stLen, stLen)
+mtPH = ta.pivothigh(high, mtLen, mtLen)
+mtPL = ta.pivotlow(low, mtLen, mtLen)
+ltPH = ta.pivothigh(high, ltLen, ltLen)
+ltPL = ta.pivotlow(low, ltLen, ltLen)
+lastSTHigh := f_register_arch_high(stPH, stLen, archHistorySTHigh, lastSTHigh, relATR, relVol)
+lastSTLow := f_register_arch_low(stPL, stLen, archHistorySTLow, lastSTLow, relATR, relVol)
+lastMTHigh := f_register_arch_high(mtPH, mtLen, archHistoryMTHigh, lastMTHigh, relATR, relVol)
+lastMTLow := f_register_arch_low(mtPL, mtLen, archHistoryMTLow, lastMTLow, relATR, relVol)
+lastLTHigh := f_register_arch_high(ltPH, ltLen, archHistoryLTHigh, lastLTHigh, relATR, relVol)
+lastLTLow := f_register_arch_low(ltPL, ltLen, archHistoryLTLow, lastLTLow, relATR, relVol)
+
+string activeArchitectureTerm = ""
+if architectureTermInput == "Auto"
+    activeArchitectureTerm := "LT"
+else if architectureTermInput != "None"
+    activeArchitectureTerm := architectureTermInput
+
+float selectedHigh = na
+float selectedLow = na
+if activeArchitectureTerm == "LT"
+    selectedHigh := lastLTHigh
+    selectedLow := lastLTLow
+else if activeArchitectureTerm == "MT"
+    selectedHigh := lastMTHigh
+    selectedLow := lastMTLow
+else if activeArchitectureTerm == "ST"
+    selectedHigh := lastSTHigh
+    selectedLow := lastSTLow
+archRangeValid = not na(selectedHigh) and not na(selectedLow) and selectedHigh > selectedLow
+archPos = archRangeValid ? (close - selectedLow) / math.max(selectedHigh - selectedLow, syminfo.mintick) : 0.5
+architectureBias = "Neutral"
+if archRangeValid
+    if close > selectedHigh
+        architectureBias := "Bullish"
+    else if close < selectedLow
+        architectureBias := "Bearish"
+    else if archPos > 0.55
+        architectureBias := "Bullish"
+    else if archPos < 0.45
+        architectureBias := "Bearish"
+longArchOk = not useArchitectureFilter or architectureBias != "Bearish"
+shortArchOk = not useArchitectureFilter or architectureBias != "Bullish"
+
+bull_break = showStructure and not na(swing_high) and close > swing_high and close[1] <= swing_high and na(broken_high)
+bear_break = showStructure and not na(swing_low) and close < swing_low and close[1] >= swing_low and na(broken_low)
+bull_choch = bull_break and structure_dir == -1
+bear_choch = bear_break and structure_dir == 1
+
+if bull_break
+    broken_high := swing_high
+    structure_dir := 1
+    last_bull_break_bar := bar_index
+    addStructureMark(swing_high_idx, swing_high, bull_choch ? "Bull CHoCH" : "Bull BOS", bull_choch ? colBullChoch : colBullBos, true)
+if bear_break
+    broken_low := swing_low
+    structure_dir := -1
+    last_bear_break_bar := bar_index
+    addStructureMark(swing_low_idx, swing_low, bear_choch ? "Bear CHoCH" : "Bear BOS", bear_choch ? colBearChoch : colBearBos, false)
+
+bull_sweep = showSweeps and not na(swing_low) and low < swing_low and close > swing_low
+bear_sweep = showSweeps and not na(swing_high) and high > swing_high and close < swing_high
+
+if bull_sweep
+    addStructureMark(bar_index - 1, swing_low, "LQ Sweep", colBullSweep, true)
+if bear_sweep
+    addStructureMark(bar_index - 1, swing_high, "LQ Sweep", colBearSweep, false)
+
+range_high = na(swing_high) ? ta.highest(high, math.min(length, 50)) : swing_high
+range_low = na(swing_low) ? ta.lowest(low, math.min(length, 50)) : swing_low
+pd_eq = (range_high + range_low) / 2.0
+in_discount = close <= pd_eq
+in_premium = close >= pd_eq
+plot(showPdEq ? pd_eq : na, "PD EQ", color = color.new(color.gray, 35), linewidth = 1, style = plot.style_linebr)
+
+reg_basis = ta.linreg(source, length, 0)
+reg_slope = reg_basis - reg_basis[5]
+poc_proxy = ta.vwma(hlc3, math.min(length, 100))
+max_bars_back(poc_proxy, 500)
+rsi_value = ta.rsi(close, obosRsiLength)
+smart_vol = not na(volume) and volume > 0 ? volume : ta.tr
+vol_pressure = (close - open) / math.max(high - low, syminfo.mintick) * smart_vol
+fpi_raw = ta.sma(vol_pressure, flowLenInput)
+fpi_highest = ta.highest(fpi_raw, flowLenInput * 2)
+fpi_lowest = ta.lowest(fpi_raw, flowLenInput * 2)
+fpi_range = math.max(fpi_highest - fpi_lowest, syminfo.mintick)
+fpi_norm = ((fpi_raw - fpi_lowest) / fpi_range * 200.0) - 100.0
+boosted_flow = math.sign(fpi_norm) * math.pow(math.abs(fpi_norm) / 100.0, 1.0 / boostInput) * 100.0
+flow_main = asf(boosted_flow, spectralLenInput)
+flow_signal = ta.ema(flow_main, 5)
+flow_is_bull = flow_main > 0
+flow_is_trending = math.abs(flow_main) > thresholdInput
+flow_impulse_bull = ta.crossover(flow_main, flow_signal) and flow_main > thresholdInput
+flow_impulse_bear = ta.crossunder(flow_main, flow_signal) and flow_main < -thresholdInput
+flow_regime = not flow_is_trending ? "Balanced" : flow_is_bull ? "Bull Flow" : "Bear Flow"
+snr_upper = reg_basis + (num_bins * dev)
+snr_lower = reg_basis - (num_bins * dev)
+snr_touch_buffer = atr14 * snrTouchAtrMult
+ob_top = reg_basis + (3.0 * stdev_val)
+ob_bottom = reg_basis + (obosBandFactor * stdev_val)
+os_top = reg_basis - (obosBandFactor * stdev_val)
+os_bottom = reg_basis - (3.0 * stdev_val)
+is_overbought = showObOsBand and close >= ob_bottom and rsi_value >= obosUpperRsi
+is_oversold = showObOsBand and close <= os_top and rsi_value <= obosLowerRsi
+ob_trigger = is_overbought and not is_overbought[1]
+os_trigger = is_oversold and not is_oversold[1]
+obos_long_score = useObOsScore and is_oversold ? 1 : 0
+obos_short_score = useObOsScore and is_overbought ? 1 : 0
+trend_bull = structure_dir == 1 or reg_slope > 0
+trend_bear = structure_dir == -1 or reg_slope < 0
+bar_range = math.max(high - low, syminfo.mintick)
+candle_body = math.abs(close - open)
+upper_wick = high - math.max(close, open)
+lower_wick = math.min(close, open) - low
+snr_long_touch = in_discount and (low <= reg_basis + snr_touch_buffer or low <= snr_lower + snr_touch_buffer)
+snr_short_touch = in_premium and (high >= reg_basis - snr_touch_buffer or high >= snr_upper - snr_touch_buffer)
+snr_long_reclaim = trend_bull and snr_long_touch and close > open and close >= reg_basis - snr_touch_buffer * 0.35
+snr_short_reject = trend_bear and snr_short_touch and close < open and close <= reg_basis + snr_touch_buffer * 0.35
+snr_bull_breakout = trend_bull and close > snr_upper and close[1] <= snr_upper
+snr_bear_breakout = trend_bear and close < snr_lower and close[1] >= snr_lower
+if snr_bull_breakout
+    last_snr_bull_break_bar := bar_index
+if snr_bear_breakout
+    last_snr_bear_break_bar := bar_index
+recent_snr_bull_breakout = not na(last_snr_bull_break_bar) and bar_index - last_snr_bull_break_bar <= entryLookback
+recent_snr_bear_breakout = not na(last_snr_bear_break_bar) and bar_index - last_snr_bear_break_bar <= entryLookback
+snr_bull_retest = trend_bull and recent_snr_bull_breakout and low <= snr_upper + snr_touch_buffer and close >= snr_upper
+snr_bear_retest = trend_bear and recent_snr_bear_breakout and high >= snr_lower - snr_touch_buffer and close <= snr_lower
+bull_pa_rejection = active_kz and in_discount and close > open and lower_wick > candle_body * 1.2 and close >= reg_basis
+bear_pa_rejection = active_kz and in_premium and close < open and upper_wick > candle_body * 1.2 and close <= reg_basis
+bull_pa_continuation = active_kz and trend_bull and close > open and close > high[1] and candle_body / bar_range > 0.55 and close > poc_proxy
+bear_pa_continuation = active_kz and trend_bear and close < open and close < low[1] and candle_body / bar_range > 0.55 and close < poc_proxy
+pa_long_ok = not usePriceActionFilter or bull_pa_rejection or bull_pa_continuation
+pa_short_ok = not usePriceActionFilter or bear_pa_rejection or bear_pa_continuation
+recent_bull_break = not na(last_bull_break_bar) and bar_index - last_bull_break_bar <= entryLookback
+recent_bear_break = not na(last_bear_break_bar) and bar_index - last_bear_break_bar <= entryLookback
+recent_bull_fvg = showFvg and not na(lastBullFvgBar) and bar_index - lastBullFvgBar <= entryLookback
+recent_bear_fvg = showFvg and not na(lastBearFvgBar) and bar_index - lastBearFvgBar <= entryLookback
+active_bull_fvg = recent_bull_fvg and (not fvgUnmitigatedOnly or not bullFvgMitigated)
+active_bear_fvg = recent_bear_fvg and (not fvgUnmitigatedOnly or not bearFvgMitigated)
+in_bull_fvg = active_bull_fvg and not na(lastBullFvgTop) and not na(lastBullFvgBottom) and close <= lastBullFvgTop and close >= lastBullFvgBottom
+in_bear_fvg = active_bear_fvg and not na(lastBearFvgTop) and not na(lastBearFvgBottom) and close <= lastBearFvgTop and close >= lastBearFvgBottom
+kz_fvg_long = in_bull_fvg or (active_bull_fvg and active_kz and in_discount)
+kz_fvg_short = in_bear_fvg or (active_bear_fvg and active_kz and in_premium)
+kz_structure_long = bull_choch or bull_sweep or recent_bull_break or kz_fvg_long or snr_long_reclaim or snr_bull_retest
+kz_structure_short = bear_choch or bear_sweep or recent_bear_break or kz_fvg_short or snr_short_reject or snr_bear_retest
+kz_reclaim_long = close <= poc_proxy or close <= reg_basis or is_oversold
+kz_reclaim_short = close >= poc_proxy or close >= reg_basis or is_overbought
+kz_flow_long = not useFlowFilter or flow_is_bull or flow_impulse_bull
+kz_flow_short = not useFlowFilter or not flow_is_bull or flow_impulse_bear
+kz_priority_bonus = is_silver_kz ? 2 : 0
+kz_long_reversal_ready = active_kz and in_discount and kz_flow_long and longArchOk and kz_reclaim_long and pa_long_ok and (bull_choch or bull_sweep or is_oversold or in_bull_fvg or bull_pa_rejection or snr_long_reclaim)
+kz_short_reversal_ready = active_kz and in_premium and kz_flow_short and shortArchOk and kz_reclaim_short and pa_short_ok and (bear_choch or bear_sweep or is_overbought or in_bear_fvg or bear_pa_rejection or snr_short_reject)
+kz_long_continuation_ready = active_kz and trend_bull and (recent_bull_break or active_bull_fvg or bull_pa_continuation or snr_long_reclaim or snr_bull_retest) and close > poc_proxy and kz_flow_long and longArchOk and pa_long_ok
+kz_short_continuation_ready = active_kz and trend_bear and (recent_bear_break or active_bear_fvg or bear_pa_continuation or snr_short_reject or snr_bear_retest) and close < poc_proxy and kz_flow_short and shortArchOk and pa_short_ok
+kz_long_score = (active_kz ? 1 : 0) + (trend_bull ? 1 : 0) + (in_discount ? 1 : 0) + (kz_structure_long ? 1 : 0) + (kz_reclaim_long ? 1 : 0) + (kz_flow_long ? 1 : 0) + (longArchOk ? 1 : 0) + (kz_fvg_long ? 1 : 0) + (pa_long_ok ? 1 : 0) + (snr_long_reclaim ? 1 : 0) + (snr_bull_retest ? 1 : 0) + kz_priority_bonus
+kz_short_score = (active_kz ? 1 : 0) + (trend_bear ? 1 : 0) + (in_premium ? 1 : 0) + (kz_structure_short ? 1 : 0) + (kz_reclaim_short ? 1 : 0) + (kz_flow_short ? 1 : 0) + (shortArchOk ? 1 : 0) + (kz_fvg_short ? 1 : 0) + (pa_short_ok ? 1 : 0) + (snr_short_reject ? 1 : 0) + (snr_bear_retest ? 1 : 0) + kz_priority_bonus
+pa_core_long_score = (active_kz ? 1 : 0) + (trend_bull ? 1 : 0) + (in_discount ? 1 : 0) + (close <= reg_basis or close <= poc_proxy ? 1 : 0) + ((bull_pa_rejection or bull_pa_continuation) ? 1 : 0) + ((bull_choch or recent_bull_break) ? 1 : 0) + (snr_long_reclaim ? 1 : 0) + (snr_bull_retest ? 1 : 0) + kz_priority_bonus
+pa_core_short_score = (active_kz ? 1 : 0) + (trend_bear ? 1 : 0) + (in_premium ? 1 : 0) + (close >= reg_basis or close >= poc_proxy ? 1 : 0) + ((bear_pa_rejection or bear_pa_continuation) ? 1 : 0) + ((bear_choch or recent_bear_break) ? 1 : 0) + (snr_short_reject ? 1 : 0) + (snr_bear_retest ? 1 : 0) + kz_priority_bonus
+pa_core_long_setup = showEntrySignals and active_kz and trend_bull and (in_discount or snr_bull_retest) and pa_long_ok and (bull_pa_rejection or bull_pa_continuation or snr_long_reclaim or snr_bull_retest) and (bull_choch or recent_bull_break or close <= reg_basis or snr_long_reclaim or snr_bull_retest)
+pa_core_short_setup = showEntrySignals and active_kz and trend_bear and (in_premium or snr_bear_retest) and pa_short_ok and (bear_pa_rejection or bear_pa_continuation or snr_short_reject or snr_bear_retest) and (bear_choch or recent_bear_break or close >= reg_basis or snr_short_reject or snr_bear_retest)
+pa_long_sweep_reversal = bull_sweep and (bull_choch or snr_long_reclaim or in_bull_fvg or bull_pa_rejection)
+pa_short_sweep_reversal = bear_sweep and (bear_choch or snr_short_reject or in_bear_fvg or bear_pa_rejection)
+pa_long_breakout = snr_bull_breakout or (bull_break and trend_bull)
+pa_short_breakout = snr_bear_breakout or (bear_break and trend_bear)
+pa_long_reclaim_signal = snr_long_reclaim or snr_bull_retest
+pa_short_reject_signal = snr_short_reject or snr_bear_retest
+pa_signal_long = pa_long_sweep_reversal or pa_long_breakout or pa_long_reclaim_signal
+pa_signal_short = pa_short_sweep_reversal or pa_short_breakout or pa_short_reject_signal
+pa_signal_score = (bull_sweep ? 1 : 0) + (bear_sweep ? 1 : 0) + (bull_choch ? 1 : 0) + (bear_choch ? 1 : 0) + (in_bull_fvg ? 1 : 0) + (in_bear_fvg ? 1 : 0) + (snr_long_reclaim ? 1 : 0) + (snr_short_reject ? 1 : 0) + (snr_bull_breakout ? 1 : 0) + (snr_bear_breakout ? 1 : 0) + (bull_pa_continuation ? 1 : 0) + (bear_pa_continuation ? 1 : 0)
+pa_signal_text = "WAIT"
+pa_signal_bias = "Neutral"
+pa_signal_reason = "No strong PA trigger"
+pa_signal_color = color.new(color.gray, 76)
+if pa_long_sweep_reversal
+    pa_signal_text := "Liquidity Sweep Long"
+    pa_signal_bias := "Long"
+    pa_signal_reason := "Lows swept and price reclaimed with bullish confirmation"
+    pa_signal_color := color.new(colLongEntry, 66)
+else if pa_short_sweep_reversal
+    pa_signal_text := "Liquidity Sweep Short"
+    pa_signal_bias := "Short"
+    pa_signal_reason := "Highs swept and price rejected with bearish confirmation"
+    pa_signal_color := color.new(colShortEntry, 66)
+else if pa_long_breakout
+    pa_signal_text := "Bull Breakout"
+    pa_signal_bias := "Long"
+    pa_signal_reason := "Price broke structure or SNR resistance"
+    pa_signal_color := color.new(colBullBos, 68)
+else if pa_short_breakout
+    pa_signal_text := "Bear Breakout"
+    pa_signal_bias := "Short"
+    pa_signal_reason := "Price broke structure or SNR support"
+    pa_signal_color := color.new(colBearBos, 68)
+else if pa_long_reclaim_signal
+    pa_signal_text := "SNR Reclaim Long"
+    pa_signal_bias := "Long"
+    pa_signal_reason := "Support held and price reclaimed above basis"
+    pa_signal_color := color.new(colSnrBasis, 60)
+else if pa_short_reject_signal
+    pa_signal_text := "SNR Reject Short"
+    pa_signal_bias := "Short"
+    pa_signal_reason := "Resistance held and price rejected below basis"
+    pa_signal_color := color.new(colSnrEdge, 60)
+bridgePaActive = aiBridgeActive and (str.length(str.trim(aiBridgePaSignal)) > 0 or str.length(str.trim(aiBridgePaReason)) > 0)
+display_pa_signal_text = bridgePaActive and str.length(str.trim(aiBridgePaSignal)) > 0 ? aiBridgePaSignal : pa_signal_text
+display_pa_signal_bias = bridgePaActive and str.length(str.trim(aiBridgePaBias)) > 0 ? aiBridgePaBias : pa_signal_bias
+display_pa_signal_reason = bridgePaActive and str.length(str.trim(aiBridgePaReason)) > 0 ? aiBridgePaReason : pa_signal_reason
+display_pa_signal_color = pa_signal_color
+if bridgePaActive
+    display_pa_signal_color := display_pa_signal_bias == "Long" ? color.new(colLongEntry, 66) : display_pa_signal_bias == "Short" ? color.new(colShortEntry, 66) : color.new(color.gray, 76)
+long_score = (trend_bull ? 1 : 0) + (in_discount ? 1 : 0) + ((not entryUseKz or active_kz) ? 1 : 0) + ((recent_bull_break or bull_sweep or snr_long_reclaim or snr_bull_retest) ? 1 : 0) + (close > poc_proxy ? 1 : 0) + (snr_long_reclaim ? 1 : 0) + (snr_bull_retest ? 1 : 0) + obos_long_score
+short_score = (trend_bear ? 1 : 0) + (in_premium ? 1 : 0) + ((not entryUseKz or active_kz) ? 1 : 0) + ((recent_bear_break or bear_sweep or snr_short_reject or snr_bear_retest) ? 1 : 0) + (close < poc_proxy ? 1 : 0) + (snr_short_reject ? 1 : 0) + (snr_bear_retest ? 1 : 0) + obos_short_score
+base_long_setup = showEntrySignals and long_score >= entryScoreMin and (not filterEntriesByObOs or not is_overbought) and (not useFlowFilter or flow_is_bull) and longArchOk
+base_short_setup = showEntrySignals and short_score >= entryScoreMin and (not filterEntriesByObOs or not is_oversold) and (not useFlowFilter or not flow_is_bull) and shortArchOk
+addEntryLabel(isLong, scoreValue) =>
+    if showEntrySignals
+        bool isSbWindow = is_silver_kz
+        entryColor = isSbWindow ? colSbEntry : isLong ? colLongEntry : colShortEntry
+        entryY = getEntryLabelY(isLong)
+        string kzWindowText = is_silver_kz ? "SB" : is_london_kz ? "LDN" : is_ny_kz ? "NY" : "KZ"
+        kzWindowText := isLong and in_bull_fvg ? kzWindowText + " FVG" : not isLong and in_bear_fvg ? kzWindowText + " FVG" : kzWindowText
+        string kzScenarioText = isLong ? (bull_choch or bull_sweep or is_oversold ? "REV" : "CONT") : (bear_choch or bear_sweep or is_overbought ? "REV" : "CONT")
+        float slPrice = isLong ? (not na(swing_low) ? swing_low : range_low) : (not na(swing_high) ? swing_high : range_high)
+        float tp1Price = isLong ? (close < poc_proxy ? poc_proxy : range_high) : (close > poc_proxy ? poc_proxy : range_low)
+        float atr_ref = math.max(ta.atr(14), syminfo.mintick * 10)
+        float tp2Price = isLong ? math.max(range_high, tp1Price) + atr_ref * (isSbWindow ? 1.2 : 0.7) : math.min(range_low, tp1Price) - atr_ref * (isSbWindow ? 1.2 : 0.7)
+        string stdEntryText = showEntryLabels ? (isLong ? "L " : "S ") + str.tostring(scoreValue) + "/7" : (isLong ? "L" : "S")
+        string kzEntryText = showEntryLabels ? "ENTRY NOW\n" + kzScenarioText + " " + (isLong ? "LONG" : "SHORT") + " " + kzWindowText + " " + str.tostring(scoreValue) + "/12" + "\nSL " + str.tostring(slPrice, "#.##") + " | TP1 " + str.tostring(tp1Price, "#.##") + " | TP2 " + str.tostring(tp2Price, "#.##") : "ENTRY NOW"
+        entryText = entryUseKz and kzPrecisionMode ? kzEntryText : stdEntryText
+        entryStyle = isLong ? label.style_label_up : label.style_label_down
+        entrySize = entryUseKz and kzPrecisionMode ? size.small : size.tiny
+        entryLabel = label.new(bar_index, entryY, entryText, xloc = xloc.bar_index, yloc = yloc.price, style = entryStyle, color = color.new(entryColor, 10), textcolor = color.white, size = entrySize)
+        array.push(entry_labels, entryLabel)
+        if entryUseKz and kzPrecisionMode
+            line entryLine = line.new(bar_index, close, bar_index + 6, close, xloc = xloc.bar_index, color = color.new(entryColor, 10), width = isSbWindow ? 2 : 1)
+            line slLine = line.new(bar_index, slPrice, bar_index + 6, slPrice, xloc = xloc.bar_index, color = color.new(colShortEntry, 15), width = 1, style = line.style_dashed)
+            line tp1Line = line.new(bar_index, tp1Price, bar_index + 6, tp1Price, xloc = xloc.bar_index, color = color.new(isLong ? colLongEntry : colShortEntry, 10), width = 1, style = line.style_dashed)
+            line tp2Line = line.new(bar_index, tp2Price, bar_index + 6, tp2Price, xloc = xloc.bar_index, color = color.new(isSbWindow ? colSbEntry : isLong ? colLongEntry : colShortEntry, 0), width = isSbWindow ? 2 : 1)
+            array.push(entry_plan_lines, entryLine)
+            array.push(entry_plan_lines, slLine)
+            array.push(entry_plan_lines, tp1Line)
+            array.push(entry_plan_lines, tp2Line)
+            trimEntryPlanLines(entryLabelLimit)
+        if array.size(entry_labels) > entryLabelLimit
+            label.delete(array.shift(entry_labels))
+raw_long_setup = paCoreMode ? pa_core_long_setup and pa_core_long_score >= 5 : entryUseKz and kzPrecisionMode ? showEntrySignals and kz_long_score >= kzEntryScoreMin and (kz_long_reversal_ready or kz_long_continuation_ready) and (not filterEntriesByObOs or not is_overbought) : base_long_setup
+raw_short_setup = paCoreMode ? pa_core_short_setup and pa_core_short_score >= 5 : entryUseKz and kzPrecisionMode ? showEntrySignals and kz_short_score >= kzEntryScoreMin and (kz_short_reversal_ready or kz_short_continuation_ready) and (not filterEntriesByObOs or not is_oversold) : base_short_setup
+aiLongAllowed = not useAiBiasFilter or aiConfidence < aiMinConfidence or aiDirection != "Bearish"
+aiShortAllowed = not useAiBiasFilter or aiConfidence < aiMinConfidence or aiDirection != "Bullish"
+long_setup = raw_long_setup and aiLongAllowed
+short_setup = raw_short_setup and aiShortAllowed
+long_trigger = long_setup and not long_setup[1]
+short_trigger = short_setup and not short_setup[1]
+pa_core_entry_trigger = paCoreMode and (long_trigger or short_trigger)
+sb_entry_trigger = (long_trigger or short_trigger) and is_silver_kz
+rev_entry_trigger = (long_trigger and kz_long_reversal_ready) or (short_trigger and kz_short_reversal_ready)
+cont_entry_trigger = (long_trigger and kz_long_continuation_ready) or (short_trigger and kz_short_continuation_ready)
+fvg_entry_trigger = (long_trigger and kz_fvg_long) or (short_trigger and kz_fvg_short)
+visibleSnrMarks = showSnrMarks and not cleanVisualMode
+visibleSnrFill = showSnrFill and not cleanVisualMode
+visibleObOsBand = showObOsBand and not cleanVisualMode
+visibleObOsMarks = showObOsMarks and not cleanVisualMode
+
+if long_trigger
+    addEntryLabel(true, paCoreMode ? pa_core_long_score : entryUseKz and kzPrecisionMode ? kz_long_score : long_score)
+if short_trigger
+    addEntryLabel(false, paCoreMode ? pa_core_short_score : entryUseKz and kzPrecisionMode ? kz_short_score : short_score)
+plotshape(paCoreMode and not cleanVisualMode and long_trigger, title = "PA Core Long Mark", style = shape.labelup, location = location.belowbar, color = color.new(colLongEntry, 0), size = size.tiny, text = "PA", textcolor = color.white)
+plotshape(paCoreMode and not cleanVisualMode and short_trigger, title = "PA Core Short Mark", style = shape.labeldown, location = location.abovebar, color = color.new(colShortEntry, 0), size = size.tiny, text = "PA", textcolor = color.white)
+plotshape(showEntrySignals and not cleanVisualMode and pa_long_sweep_reversal, title = "PA Sweep Long", style = shape.labelup, location = location.belowbar, color = color.new(colLongEntry, 8), size = size.tiny, text = "SWP", textcolor = color.white)
+plotshape(showEntrySignals and not cleanVisualMode and pa_short_sweep_reversal, title = "PA Sweep Short", style = shape.labeldown, location = location.abovebar, color = color.new(colShortEntry, 8), size = size.tiny, text = "SWP", textcolor = color.white)
+plotshape(showEntrySignals and not cleanVisualMode and pa_long_breakout, title = "PA Bull Breakout", style = shape.triangleup, location = location.belowbar, color = color.new(colBullBos, 0), size = size.tiny, text = "BO", textcolor = color.white)
+plotshape(showEntrySignals and not cleanVisualMode and pa_short_breakout, title = "PA Bear Breakout", style = shape.triangledown, location = location.abovebar, color = color.new(colBearBos, 0), size = size.tiny, text = "BO", textcolor = color.white)
+plotshape(visibleSnrMarks and snr_long_reclaim, title = "SNR Long Reclaim", style = shape.triangleup, location = location.belowbar, color = color.new(colSnrBasis, 0), size = size.tiny, text = "SNR", textcolor = color.black)
+plotshape(visibleSnrMarks and snr_short_reject, title = "SNR Short Reject", style = shape.triangledown, location = location.abovebar, color = color.new(colSnrBasis, 0), size = size.tiny, text = "SNR", textcolor = color.black)
+plotshape(visibleSnrMarks and snr_bull_retest, title = "SNR Bull Retest", style = shape.diamond, location = location.belowbar, color = color.new(colSnrEdge, 0), size = size.tiny, text = "RT", textcolor = color.white)
+plotshape(visibleSnrMarks and snr_bear_retest, title = "SNR Bear Retest", style = shape.diamond, location = location.abovebar, color = color.new(colSnrEdge, 0), size = size.tiny, text = "RT", textcolor = color.white)
+plotshape(visibleObOsMarks and ob_trigger, title = "Overbought Mark", style = shape.circle, location = location.abovebar, color = color.new(colShortEntry, 0), size = size.tiny, text = "OB", textcolor = color.white)
+plotshape(visibleObOsMarks and os_trigger, title = "Oversold Mark", style = shape.circle, location = location.belowbar, color = color.new(colLongEntry, 0), size = size.tiny, text = "OS", textcolor = color.white)
+
+snr_basis_plot = plot(showLiveSnr ? reg_basis : na, "SNR Basis Live", color = color.new(colSnrBasis, 10), linewidth = 2)
+snr_upper_plot = plot(showLiveSnr ? snr_upper : na, "SNR Upper Live", color = color.new(colSnrEdge, 76), linewidth = 1)
+snr_lower_plot = plot(showLiveSnr ? snr_lower : na, "SNR Lower Live", color = color.new(colSnrEdge, 76), linewidth = 1)
+fill(snr_upper_plot, snr_lower_plot, color = showLiveSnr and visibleSnrFill ? color.new(colSnrFill, 94) : na, title = "SNR Channel Fill")
+
+ob_top_plot = plot(visibleObOsBand ? ob_top : na, "OB Top", color = color.new(colShortEntry, 100))
+ob_bottom_plot = plot(visibleObOsBand ? ob_bottom : na, "OB Bottom", color = color.new(colShortEntry, 100))
+os_top_plot = plot(visibleObOsBand ? os_top : na, "OS Top", color = color.new(colLongEntry, 100))
+os_bottom_plot = plot(visibleObOsBand ? os_bottom : na, "OS Bottom", color = color.new(colLongEntry, 100))
+fill(ob_top_plot, ob_bottom_plot, color = visibleObOsBand ? (is_overbought ? color.new(colShortEntry, 82) : color.new(colShortEntry, 93)) : na, title = "Overbought Zone")
+fill(os_top_plot, os_bottom_plot, color = visibleObOsBand ? (is_oversold ? color.new(colLongEntry, 82) : color.new(colLongEntry, 93)) : na, title = "Oversold Zone")
+
+// Wrap calculations strictly when array exists and contains data
+if barstate.islast and array.size(predictions) > 0
+    int pred_size = array.size(predictions)
+    
+    // 1. Calculate profile distributions safely
+    // Clear old dynamic elements safely
+    if array.size(active_lines) > 0
+        for p in active_lines
+            polyline.delete(p)
+        array.clear(active_lines)
+
+    // Draw the SNR anchor and channel levels
+    drawGridLayer(0.0, true, colLongEntry, colShortEntry, baseStyle, gridStyle)
+    drawGridLayer(num_bins * dev, false, colLongEntry, colShortEntry, baseStyle, gridStyle)
+    drawGridLayer(-num_bins * dev, false, colLongEntry, colShortEntry, baseStyle, gridStyle)
+
+    bool is_bullish = array.get(predictions, pred_size - 1) > array.get(predictions, 0)
+    float y_high = poc_proxy
+
+    if showPoc and pred_size > 0
+        poc_points = array.new<chart.point>()
+        for idx = 0 to length - 1
+            int safe_idx = math.min(idx, pred_size - 1)
+            target_x = bar_index + safe_idx - length + 1
+            poc_points.push(chart.point.from_index(target_x, poc_proxy[safe_idx]))
+        if array.size(poc_points) > 1
+            array.push(active_lines, polyline.new(poc_points, line_width = pocWidth, line_style = pocStyle, line_color = pocColor))
+
+    // Channel boundary values for dashboard
+    float chan_high_y = 0.0
+    float chan_low_y  = 0.0
+    if pred_size > 0
+        chan_high_y := array.get(predictions, pred_size - 1) + (num_bins * dev)
+        chan_low_y  := array.get(predictions, pred_size - 1) - (num_bins * dev)
+
+    // 6. Update the Information Dashboard Table with Custom Size Constants
+    session_text = "Sessions Off"
+    if showSessions
+        session_text := "OFF"
+        if is_asia
+            session_text := "A"
+        else if is_london
+            session_text := "L"
+        else if is_ny
+            session_text := "NY"
+
+    kz_text = "No KZ"
+    if is_silver_kz
+        kz_text := "SB"
+    else if is_london_kz
+        kz_text := "LKZ"
+    else if is_ny_kz
+        kz_text := "NKZ"
+
+    kz_bias_text = "Outside KZ"
+    kz_bias_color = color.new(color.gray, 75)
+    if active_kz
+        if trend_bull and in_discount
+            kz_bias_text := "Long Side Active"
+            kz_bias_color := color.new(colLongEntry, 70)
+        else if trend_bear and in_premium
+            kz_bias_text := "Short Side Active"
+            kz_bias_color := color.new(colShortEntry, 70)
+        else if in_discount
+            kz_bias_text := "Watch Long Trigger"
+            kz_bias_color := color.new(colLongEntry, 82)
+        else if in_premium
+            kz_bias_text := "Watch Short Trigger"
+            kz_bias_color := color.new(colShortEntry, 82)
+        else
+            kz_bias_text := "Need PD Shift"
+
+    silver_bias_text = "SILVER INACTIVE"
+    silver_bias_color = color.new(color.gray, 80)
+    if is_silver_kz
+        if long_setup or (kz_structure_long and in_discount) or (bull_pa_rejection and in_discount) or (in_bull_fvg and in_discount)
+            silver_bias_text := "SILVER BUY"
+            silver_bias_color := color.new(colLongEntry, 68)
+        else if short_setup or (kz_structure_short and in_premium) or (bear_pa_rejection and in_premium) or (in_bear_fvg and in_premium)
+            silver_bias_text := "SILVER SELL"
+            silver_bias_color := color.new(colShortEntry, 68)
+        else
+            silver_bias_text := "SILVER WAIT"
+            silver_bias_color := color.new(colSilver, 72)
+
+    kz_entry_text = "No Active Entry"
+    kz_entry_color = color.new(color.gray, 75)
+    kz_scenario_text = "No Scenario"
+    if active_kz and kz_long_reversal_ready
+        kz_scenario_text := (is_silver_kz ? "SB " : "") + "Bull Reversal"
+    else if active_kz and kz_short_reversal_ready
+        kz_scenario_text := (is_silver_kz ? "SB " : "") + "Bear Reversal"
+    else if active_kz and kz_long_continuation_ready
+        kz_scenario_text := (is_silver_kz ? "SB " : "") + "Bull Continuation"
+    else if active_kz and kz_short_continuation_ready
+        kz_scenario_text := (is_silver_kz ? "SB " : "") + "Bear Continuation"
+    if long_setup
+        kz_entry_text := paCoreMode ? "PA ENTRY NOW Long " + str.tostring(pa_core_long_score) + "/10" : (kz_fvg_long ? "FVG ENTRY NOW Long " : snr_bull_retest ? "SNR RETEST Long " : snr_long_reclaim ? "SNR ENTRY NOW Long " : "ENTRY NOW Long ") + str.tostring(kzPrecisionMode and entryUseKz ? kz_long_score : long_score) + "/" + str.tostring(kzPrecisionMode and entryUseKz ? 13 : 8)
+        kz_entry_color := color.new(paCoreMode ? colLongEntry : kz_fvg_long ? colBullFvg : colLongEntry, 60)
+    else if short_setup
+        kz_entry_text := paCoreMode ? "PA ENTRY NOW Short " + str.tostring(pa_core_short_score) + "/10" : (kz_fvg_short ? "FVG ENTRY NOW Short " : snr_bear_retest ? "SNR RETEST Short " : snr_short_reject ? "SNR ENTRY NOW Short " : "ENTRY NOW Short ") + str.tostring(kzPrecisionMode and entryUseKz ? kz_short_score : short_score) + "/" + str.tostring(kzPrecisionMode and entryUseKz ? 13 : 8)
+        kz_entry_color := color.new(paCoreMode ? colShortEntry : kz_fvg_short ? colBearFvg : colShortEntry, 60)
+    else if active_kz and kz_structure_long and in_discount
+        kz_entry_text := "Wait Bull Reclaim"
+        kz_entry_color := color.new(colLongEntry, 80)
+    else if active_kz and kz_structure_short and in_premium
+        kz_entry_text := "Wait Bear Reject"
+        kz_entry_color := color.new(colShortEntry, 80)
+
+    float invalidation_price = na
+    if long_setup
+        invalidation_price := not na(swing_low) ? swing_low : range_low
+    else if short_setup
+        invalidation_price := not na(swing_high) ? swing_high : range_high
+    invalidation_text = na(invalidation_price) ? "None" : str.tostring(invalidation_price, "#.##")
+
+    structure_text = "Neutral"
+    if bull_choch
+        structure_text := "Bull CHoCH"
+    else if bear_choch
+        structure_text := "Bear CHoCH"
+    else if bull_break
+        structure_text := "Bull BOS"
+    else if bear_break
+        structure_text := "Bear BOS"
+    else if structure_dir == 1
+        structure_text := "Bull Bias"
+    else if structure_dir == -1
+        structure_text := "Bear Bias"
+
+    price_zone = "EQ"
+    if close < pd_eq
+        price_zone := "Discount"
+    else if close > pd_eq
+        price_zone := "Premium"
+
+    obos_text = "Neutral"
+    if is_overbought
+        obos_text := "Overbought"
+    else if is_oversold
+        obos_text := "Oversold"
+
+    architecture_text = "Hidden"
+    if showArchitectureDash
+        architecture_text := activeArchitectureTerm == "" ? "None" : activeArchitectureTerm + " | " + architectureBias
+
+    fvg_text = "No FVG"
+    fvg_color = color.new(color.black, 70)
+    if in_bull_fvg
+        fvg_text := "Bull FVG Active"
+        fvg_color := color.new(colBullFvg, 72)
+    else if in_bear_fvg
+        fvg_text := "Bear FVG Active"
+        fvg_color := color.new(colBearFvg, 72)
+    else if recent_bull_fvg
+        fvg_text := "Bull FVG Recent"
+        fvg_color := color.new(colBullFvg, 84)
+    else if recent_bear_fvg
+        fvg_text := "Bear FVG Recent"
+        fvg_color := color.new(colBearFvg, 84)
+
+    pa_text = "No PA"
+    pa_color = color.new(color.black, 70)
+    if bull_pa_rejection
+        pa_text := "Bull Rejection"
+        pa_color := color.new(colLongEntry, 72)
+    else if bear_pa_rejection
+        pa_text := "Bear Rejection"
+        pa_color := color.new(colShortEntry, 72)
+    else if snr_long_reclaim
+        pa_text := "SNR Bull Reclaim"
+        pa_color := color.new(colSnrBasis, 62)
+    else if snr_short_reject
+        pa_text := "SNR Bear Reject"
+        pa_color := color.new(colSnrBasis, 62)
+    else if snr_bull_retest
+        pa_text := "SNR Bull Retest"
+        pa_color := color.new(colLongEntry, 70)
+    else if snr_bear_retest
+        pa_text := "SNR Bear Retest"
+        pa_color := color.new(colShortEntry, 70)
+    else if bull_pa_continuation
+        pa_text := "Bull Continuation"
+        pa_color := color.new(colLongEntry, 82)
+    else if bear_pa_continuation
+        pa_text := "Bear Continuation"
+        pa_color := color.new(colShortEntry, 82)
+
+    forecast_text = display_pa_signal_text
+    forecast_color = display_pa_signal_color
+    bias_delta = long_score - short_score
+    if pa_signal_text == "WAIT" and bull_choch
+        forecast_text := "Bull Reversal"
+        forecast_color := color.new(colBullChoch, 65)
+    else if pa_signal_text == "WAIT" and bear_choch
+        forecast_text := "Bear Reversal"
+        forecast_color := color.new(colBearChoch, 65)
+    else if pa_signal_text == "WAIT" and long_setup and long_score >= 5
+        forecast_text := "Bull Continuation"
+        forecast_color := color.new(colLongEntry, 60)
+    else if pa_signal_text == "WAIT" and short_setup and short_score >= 5
+        forecast_text := "Bear Continuation"
+        forecast_color := color.new(colShortEntry, 60)
+    else if pa_signal_text == "WAIT" and bias_delta >= 2 and reg_slope > 0 and close >= poc_proxy
+        forecast_text := "Bull Pressure"
+        forecast_color := color.new(colLongEntry, 72)
+    else if pa_signal_text == "WAIT" and bias_delta <= -2 and reg_slope < 0 and close <= poc_proxy
+        forecast_text := "Bear Pressure"
+        forecast_color := color.new(colShortEntry, 72)
+    else if pa_signal_text == "WAIT" and in_discount and reg_slope > 0
+        forecast_text := "Buy Zone Rebound"
+        forecast_color := color.new(colLongEntry, 78)
+    else if pa_signal_text == "WAIT" and in_premium and reg_slope < 0
+        forecast_text := "Sell Zone Fade"
+        forecast_color := color.new(colShortEntry, 78)
+    else if pa_signal_text == "WAIT" and active_kz and in_bull_fvg
+        forecast_text := "Bull FVG Reclaim"
+        forecast_color := color.new(colBullFvg, 70)
+    else if pa_signal_text == "WAIT" and active_kz and in_bear_fvg
+        forecast_text := "Bear FVG Reject"
+        forecast_color := color.new(colBearFvg, 70)
+
+    float forecast_conf_raw = math.abs(bias_delta) * 16.0 + (bull_choch or bear_choch ? 18.0 : 0.0) + (flow_is_trending ? 10.0 : 0.0) + (architectureBias != "Neutral" ? 8.0 : 0.0)
+    float forecast_conf = math.min(95.0, forecast_conf_raw)
+    conf_text = str.tostring(math.round(forecast_conf)) + "%"
+
+    target_text = "POC Magnet"
+    if str.contains(forecast_text, "Bull")
+        target_text := close < poc_proxy ? "Target POC" : "Target Upper"
+    else if str.contains(forecast_text, "Bear")
+        target_text := close > poc_proxy ? "Target POC" : "Target Lower"
+    else if str.contains(forecast_text, "Long")
+        target_text := close < poc_proxy ? "Target POC" : "Target Upper"
+    else if str.contains(forecast_text, "Short")
+        target_text := close > poc_proxy ? "Target POC" : "Target Lower"
+
+    float forecast_target_price = poc_proxy
+    if target_text == "Target Upper"
+        forecast_target_price := chan_high_y
+    else if target_text == "Target Lower"
+        forecast_target_price := chan_low_y
+
+    move_text = "Flat"
+    if forecast_target_price > close
+        move_text := "Up " + str.tostring((forecast_target_price - close) / close * 100.0, "#.##") + "%"
+    else if forecast_target_price < close
+        move_text := "Down " + str.tostring((close - forecast_target_price) / close * 100.0, "#.##") + "%"
+
+    ai_bias_text = aiDirection == "Bullish" ? "BULL" : aiDirection == "Bearish" ? "BEAR" : "NEUTRAL"
+    ai_text = (aiBridgeActive ? "BRG | " : "") + ai_bias_text + " " + str.tostring(aiProbability, "#.#") + "% | " + str.tostring(aiConfidence, "#.#") + "% | " + aiSession + " | " + aiEntry
+    ai_verbose_text = (aiBridgeActive ? "Bridge | " : "") + aiDirection + " | Move " + str.tostring(aiProbability, "#.#") + "% | Dir " + str.tostring(aiConfidence, "#.#") + "% | " + aiSession + " | " + aiEntry
+    if str.length(aiNotes) > 0
+        ai_verbose_text := ai_verbose_text + " | " + aiNotes
+    ai_display_text = aiPanelMode == "Verbose" ? ai_verbose_text : ai_text
+    ai_color = color.new(color.gray, 72)
+    if aiDirection == "Bullish"
+        ai_color := color.new(colLongEntry, 72)
+    else if aiDirection == "Bearish"
+        ai_color := color.new(colShortEntry, 72)
+    ai_forecast_text = "WAIT"
+    ai_forecast_target = "Hold"
+    ai_forecast_color = color.new(color.gray, 72)
+    if aiDirection == "Bullish" and aiProbability >= aiMinConfidence
+        ai_forecast_text := aiEntry == "Wait" ? "BUY WATCH" : "BUY NOW"
+        ai_forecast_target := close < poc_proxy ? "POC -> U" : "U Extension"
+        ai_forecast_color := color.new(colLongEntry, 68)
+    else if aiDirection == "Bearish" and aiProbability >= aiMinConfidence
+        ai_forecast_text := aiEntry == "Wait" ? "SELL WATCH" : "SELL NOW"
+        ai_forecast_target := close > poc_proxy ? "POC -> L" : "L Extension"
+        ai_forecast_color := color.new(colShortEntry, 68)
+    else if aiDirection == "Bullish"
+        ai_forecast_text := "BULL WATCH"
+        ai_forecast_target := "Need Trigger"
+        ai_forecast_color := color.new(colLongEntry, 82)
+    else if aiDirection == "Bearish"
+        ai_forecast_text := "BEAR WATCH"
+        ai_forecast_target := "Need Trigger"
+        ai_forecast_color := color.new(colShortEntry, 82)
+    ai_forecast_display = ai_forecast_text + " | " + ai_forecast_target
+
+    setup_text = "Wait"
+    if long_setup
+        setup_text := paCoreMode ? "Long " + str.tostring(pa_core_long_score) + "/10 CORE" : entryUseKz and kzPrecisionMode ? "Long " + str.tostring(kz_long_score) + "/13" + (kz_fvg_long ? " FVG" : "") + (snr_bull_retest ? " RT" : snr_long_reclaim ? " SNR" : "") + (pa_long_ok and usePriceActionFilter ? " PA" : "") : "Long " + str.tostring(long_score) + "/8"
+    else if short_setup
+        setup_text := paCoreMode ? "Short " + str.tostring(pa_core_short_score) + "/10 CORE" : entryUseKz and kzPrecisionMode ? "Short " + str.tostring(kz_short_score) + "/13" + (kz_fvg_short ? " FVG" : "") + (snr_bear_retest ? " RT" : snr_short_reject ? " SNR" : "") + (pa_short_ok and usePriceActionFilter ? " PA" : "") : "Short " + str.tostring(short_score) + "/8"
+
+    setup_color = color.new(color.gray, 60)
+    if long_setup
+        setup_color := colLongEntry
+    else if short_setup
+        setup_color := colShortEntry
+
+    pa_reason_short = str.length(display_pa_signal_reason) > 34 ? str.substring(display_pa_signal_reason, 0, 34) + "..." : display_pa_signal_reason
+    minimalObosVisible = is_overbought or is_oversold
+    currentDashRows = paCoreMode ? 6 + (showPaPlaybook ? 1 : 0) + (showAiPanel ? 2 : 0) + (minimalObosVisible ? 1 : 0) : dashModeInput == "Minimal" ? 6 + (showPaPlaybook ? 1 : 0) + (showAiPanel ? 2 : 0) + (minimalObosVisible ? 1 : 0) : dashRows + (showAiPanel ? 1 : 0) + (showPaPlaybook ? 1 : 0)
+
+    if na(info_dash) or dashModePrev != dashModeInput or dashRowsPrev != currentDashRows
+        if not na(info_dash)
+            table.delete(info_dash)
+        info_dash := table.new(position.top_right, 2, currentDashRows, bgcolor = cleanVisualMode ? color.new(color.black, 100) : color.new(color.black, 20), border_color = cleanVisualMode ? color.new(chart.bg_color, 100) : chart.bg_color, border_width = cleanVisualMode ? 0 : 2)
+        dashModePrev := dashModeInput
+        dashRowsPrev := currentDashRows
+
+    table.cell(info_dash, 0, 0, "SNR SMC", text_color = chart.fg_color, text_size = dashSize, bgcolor = cleanVisualMode ? color.new(chart.bg_color, 100) : chart.bg_color)
+    table.cell(info_dash, 1, 0, "UTC+9", text_color = chart.fg_color, text_size = dashSize, bgcolor = cleanVisualMode ? color.new(chart.bg_color, 100) : chart.bg_color)
+
+    if paCoreMode
+        coreRow = 1
+        table.cell(info_dash, 0, coreRow, "Session", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, showSessions ? session_text + " | " + kz_text : "Off | " + kz_text, text_color = color.white, text_size = dashSize)
+        coreRow += 1
+
+        table.cell(info_dash, 0, coreRow, "Silver", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, silver_bias_text, text_color = color.white, text_size = dashSize, bgcolor = silver_bias_color)
+        coreRow += 1
+
+        table.cell(info_dash, 0, coreRow, "Setup", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, setup_text, text_color = color.white, text_size = dashSize, bgcolor = setup_color)
+        coreRow += 1
+
+        table.cell(info_dash, 0, coreRow, "PA", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, display_pa_signal_text + " | " + display_pa_signal_bias, text_color = color.white, text_size = dashSize, bgcolor = display_pa_signal_color)
+        coreRow += 1
+
+        if showPaPlaybook
+            table.cell(info_dash, 0, coreRow, "Reason", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, coreRow, pa_reason_short, text_color = color.white, text_size = dashSize)
+            coreRow += 1
+
+        table.cell(info_dash, 0, coreRow, "Entry", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, kz_entry_text, text_color = color.white, text_size = dashSize, bgcolor = kz_entry_color)
+        coreRow += 1
+
+        table.cell(info_dash, 0, coreRow, "Target", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, coreRow, target_text + " | " + move_text, text_color = color.white, text_size = dashSize)
+        if showAiPanel
+            coreRow += 1
+            table.cell(info_dash, 0, coreRow, "AI", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, coreRow, ai_display_text, text_color = color.white, text_size = dashSize, bgcolor = ai_color)
+            coreRow += 1
+            table.cell(info_dash, 0, coreRow, "AI Fcst", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, coreRow, ai_forecast_display, text_color = color.white, text_size = dashSize, bgcolor = ai_forecast_color)
+        if minimalObosVisible
+            coreRow += 1
+            table.cell(info_dash, 0, coreRow, "OB / OS", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, coreRow, obos_text + " | RSI " + str.tostring(rsi_value, "#"), text_color = color.white, text_size = dashSize, bgcolor = is_overbought ? color.new(colShortEntry, 75) : color.new(colLongEntry, 75))
+    else if dashModeInput == "Minimal"
+        minimalRow = 1
+        table.cell(info_dash, 0, minimalRow, "Session", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, minimalRow, showSessions ? session_text + " | " + kz_text : "Off | " + kz_text, text_color = color.white, text_size = dashSize)
+        minimalRow += 1
+
+        table.cell(info_dash, 0, minimalRow, "Silver", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, minimalRow, silver_bias_text, text_color = color.white, text_size = dashSize, bgcolor = silver_bias_color)
+        minimalRow += 1
+
+        table.cell(info_dash, 0, minimalRow, "Setup", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, minimalRow, setup_text, text_color = color.white, text_size = dashSize, bgcolor = setup_color)
+        minimalRow += 1
+
+        table.cell(info_dash, 0, minimalRow, "PA", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, minimalRow, display_pa_signal_text + " | " + display_pa_signal_bias, text_color = color.white, text_size = dashSize, bgcolor = display_pa_signal_color)
+        minimalRow += 1
+
+        if showPaPlaybook
+            table.cell(info_dash, 0, minimalRow, "Reason", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, minimalRow, pa_reason_short, text_color = color.white, text_size = dashSize)
+            minimalRow += 1
+
+        table.cell(info_dash, 0, minimalRow, "Target", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, minimalRow, target_text + " | " + move_text, text_color = color.white, text_size = dashSize)
+        minimalRow += 1
+
+        if showAiPanel
+            table.cell(info_dash, 0, minimalRow, "AI", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, minimalRow, ai_display_text, text_color = color.white, text_size = dashSize, bgcolor = ai_color)
+            minimalRow += 1
+            table.cell(info_dash, 0, minimalRow, "AI Fcst", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, minimalRow, ai_forecast_display, text_color = color.white, text_size = dashSize, bgcolor = ai_forecast_color)
+            minimalRow += 1
+
+        if minimalObosVisible
+            table.cell(info_dash, 0, minimalRow, "OB / OS", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, minimalRow, obos_text + " | RSI " + str.tostring(rsi_value, "#"), text_color = color.white, text_size = dashSize, bgcolor = is_overbought ? color.new(colShortEntry, 75) : color.new(colLongEntry, 75))
+    else
+        table.cell(info_dash, 0, 1, "Direction", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 1, is_bullish ? "Bullish" : "Bearish", text_color = color.white, text_size = dashSize, bgcolor = is_bullish ? color.new(colLongEntry, 70) : color.new(colShortEntry, 70))
+
+        table.cell(info_dash, 0, 2, "Session", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 2, session_text, text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 3, "Kill Zone", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 3, kz_text, text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 4, "SMC", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 4, structure_text + " | " + fvg_text, text_color = color.white, text_size = dashSize, bgcolor = in_bull_fvg ? color.new(colBullFvg, 72) : in_bear_fvg ? color.new(colBearFvg, 72) : bull_choch or bull_break ? color.new(colBullBos, 70) : bear_choch or bear_break ? color.new(colBearBos, 70) : color.new(color.black, 70))
+
+        table.cell(info_dash, 0, 5, "PA", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 5, pa_text, text_color = color.white, text_size = dashSize, bgcolor = pa_color)
+
+        table.cell(info_dash, 0, 6, "Architecture", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 6, architecture_text, text_color = color.white, text_size = dashSize, bgcolor = architectureBias == "Bullish" ? color.new(colLongEntry, 80) : architectureBias == "Bearish" ? color.new(colShortEntry, 80) : color.new(color.black, 70))
+
+        table.cell(info_dash, 0, 7, "PD Zone", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 7, price_zone, text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 8, "POC", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 8, str.tostring(y_high, "#.##"), text_color = color.yellow, text_size = dashSize)
+
+        table.cell(info_dash, 0, 9, "Setup", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 9, setup_text, text_color = color.white, text_size = dashSize, bgcolor = setup_color)
+
+        table.cell(info_dash, 0, 10, "KZ Bias", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 10, kz_bias_text, text_color = color.white, text_size = dashSize, bgcolor = kz_bias_color)
+
+        table.cell(info_dash, 0, 11, "KZ Entry", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 11, kz_entry_text, text_color = color.white, text_size = dashSize, bgcolor = kz_entry_color)
+
+        table.cell(info_dash, 0, 12, "KZ Type", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 12, kz_scenario_text, text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 13, "Silver", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 13, silver_bias_text, text_color = color.white, text_size = dashSize, bgcolor = silver_bias_color)
+
+        table.cell(info_dash, 0, 14, "PA Sig", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 14, display_pa_signal_text + " | " + display_pa_signal_bias + " | " + str.tostring(pa_signal_score), text_color = color.white, text_size = dashSize, bgcolor = display_pa_signal_color)
+
+        table.cell(info_dash, 0, 15, "Invalid", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 15, invalidation_text, text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 16, "Target", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 16, target_text + " | " + str.tostring(forecast_target_price, "#.##"), text_color = color.white, text_size = dashSize)
+
+        table.cell(info_dash, 0, 17, "Flow", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+        table.cell(info_dash, 1, 17, showFlowDashboard ? flow_regime + " | " + str.tostring(flow_main, "#") : "Hidden", text_color = color.white, text_size = dashSize, bgcolor = flow_impulse_bull ? color.new(colLongEntry, 75) : flow_impulse_bear ? color.new(colShortEntry, 75) : color.new(color.black, 70))
+        if showPaPlaybook
+            table.cell(info_dash, 0, 18, "PA Why", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, 18, pa_reason_short, text_color = color.white, text_size = dashSize)
+        if showAiPanel
+            table.cell(info_dash, 0, showPaPlaybook ? 19 : 18, "AI", text_color = color.white, text_size = dashSize, text_halign = text.align_left)
+            table.cell(info_dash, 1, showPaPlaybook ? 19 : 18, ai_display_text, text_color = color.white, text_size = dashSize, bgcolor = ai_color)
+
+    if is_silver_kz and not na(silver_kz_label)
+        label.set_text(silver_kz_label, silver_bias_text)
+        label.set_color(silver_kz_label, color.new(is_silver_kz and silver_bias_text == "SILVER BUY" ? colLongEntry : is_silver_kz and silver_bias_text == "SILVER SELL" ? colShortEntry : colSilver, 0))
+    if is_silver_kz and not na(silver_kz_box)
+        box.set_bgcolor(silver_kz_box, getKzBg(colSilver, true, true))
+        box.set_border_color(silver_kz_box, getKzBorder(colSilver, true, true))
+
+alertcondition(long_trigger, "Ideal Long Entry", "Ideal long entry confluence on {{ticker}} {{interval}}")
+alertcondition(short_trigger, "Ideal Short Entry", "Ideal short entry confluence on {{ticker}} {{interval}}")
+alertcondition(bull_break, "Bull BOS/CHoCH", "Bullish structure break on {{ticker}} {{interval}}")
+alertcondition(bear_break, "Bear BOS/CHoCH", "Bearish structure break on {{ticker}} {{interval}}")
+alertcondition(bull_sweep, "Bullish Liquidity Sweep", "Bullish liquidity sweep on {{ticker}} {{interval}}")
+alertcondition(bear_sweep, "Bearish Liquidity Sweep", "Bearish liquidity sweep on {{ticker}} {{interval}}")
+alertcondition(bull_fvg, "Bullish FVG", "Bullish fair value gap detected on {{ticker}} {{interval}}")
+alertcondition(bear_fvg, "Bearish FVG", "Bearish fair value gap detected on {{ticker}} {{interval}}")
+alertcondition(ob_trigger, "Overbought Entered", "Price entered overbought zone on {{ticker}} {{interval}}")
+alertcondition(os_trigger, "Oversold Entered", "Price entered oversold zone on {{ticker}} {{interval}}")
+alertcondition(long_trigger and architectureBias == "Bullish", "Long With Architecture", "Ideal long entry aligned with market architecture on {{ticker}} {{interval}}")
+alertcondition(short_trigger and architectureBias == "Bearish", "Short With Architecture", "Ideal short entry aligned with market architecture on {{ticker}} {{interval}}")
+alertcondition(sb_entry_trigger, "SB ENTRY NOW", "Silver Bullet entry now on {{ticker}} {{interval}}")
+alertcondition(rev_entry_trigger, "REV ENTRY NOW", "Reversal entry now on {{ticker}} {{interval}}")
+alertcondition(cont_entry_trigger, "CONT ENTRY NOW", "Continuation entry now on {{ticker}} {{interval}}")
+alertcondition(fvg_entry_trigger, "FVG ENTRY NOW", "Fair value gap entry now on {{ticker}} {{interval}}")
+alertcondition(pa_core_entry_trigger, "PA CORE ENTRY NOW", "Price Action + SNR + Kill Zone core entry now on {{ticker}} {{interval}}")
+
+// }
