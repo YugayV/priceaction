@@ -1,0 +1,30 @@
+{
+  "assets": {
+    "bitcoin": {
+      "symbol": "BTC-USD",
+      "name": "Bitcoin",
+      "exchange": "Binance",
+      "keywords": ["bitcoin", "btc", "cryptocurrency"]
+    },
+    "gold": {
+      "symbol": "GC=F",
+      "name": "Gold",
+      "exchange": "COMEX",
+      "keywords": ["gold", "xau", "precious metal"]
+    },
+    "eurusd": {
+      "symbol": "EURUSD=X",
+      "name": "EUR/USD",
+      "exchange": "Forex",
+      "keywords": ["eurusd", "euro", "dollar", "forex"]
+    }
+  },
+  "deepseek": {
+    "api_base": "https://api.deepseek.com",
+    "model": "deepseek-chat"
+  },
+  "news": {
+    "max_articles": 10,
+    "language": "en"
+  }
+}

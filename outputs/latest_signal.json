@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-06-22 00:30:00+09:00",
+  "symbol": "BTC-USD",
+  "timeframe": "15m",
+  "close": 64206.0,
+  "large_move_probability": 0.0673947021250874,
+  "up_move_probability": 0.039751471912194816,
+  "down_move_probability": 0.9602485280878051,
+  "snr_bias": "below_basis",
+  "session_state": "new_york",
+  "kill_zone_state": "no_kz",
+  "smc_state": "neutral",
+  "entry_state": "wait",
+  "notes": "Notebook export aligned with SNR_Line.pine"
+}
