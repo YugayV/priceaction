@@ -262,10 +262,52 @@ def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False, min_periods=span).mean()
 
 
+def _sma(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(length, min_periods=length).mean()
+
+
+def _rolling_std(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(length, min_periods=length).std()
+
+
+def _macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema_fast = _ema(close, fast)
+    ema_slow = _ema(close, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def _stoch(df: pd.DataFrame, k: int = 14, d: int = 3, smooth_k: int = 3) -> tuple[pd.Series, pd.Series]:
+    low_k = df["low"].rolling(k, min_periods=k).min()
+    high_k = df["high"].rolling(k, min_periods=k).max()
+    denom = (high_k - low_k).replace(0, np.nan)
+    k_raw = (df["close"] - low_k) / denom * 100.0
+    k_smooth = k_raw.rolling(smooth_k, min_periods=smooth_k).mean()
+    d_line = k_smooth.rolling(d, min_periods=d).mean()
+    return k_smooth, d_line
+
+
+def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    direction = np.sign(close.diff()).fillna(0.0)
+    return (direction * volume.fillna(0.0)).cumsum()
+
+
+def _vwap_daily(df: pd.DataFrame) -> pd.Series:
+    idx = df.index
+    day_key = pd.Series(idx.tz_convert("UTC").date, index=idx)
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    pv = tp * df["volume"].fillna(0.0)
+    pv_cum = pv.groupby(day_key).cumsum()
+    vol_cum = df["volume"].fillna(0.0).groupby(day_key).cumsum().replace(0, np.nan)
+    return pv_cum / vol_cum
+
+
+
 def _rsi(close: pd.Series, length: int) -> pd.Series:
     delta = close.diff()
     up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
     avg_up = up.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
     avg_down = down.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
     rs = avg_up / avg_down.replace(0, np.nan)
@@ -339,6 +381,19 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
     typical_price = (data["high"] + data["low"] + data["close"]) / 3.0
     data["atr14"] = _atr(data, cfg.atr_period)
     data["rsi"] = _rsi(data["close"], cfg.rsi_length)
+    data["ema20"] = _ema(data["close"], 20)
+    data["ema50"] = _ema(data["close"], 50)
+    data["ema200"] = _ema(data["close"], 200)
+    data["vwap_d"] = _vwap_daily(data)
+    data["bb_mid"] = _sma(data["close"], 20)
+    data["bb_std"] = _rolling_std(data["close"], 20)
+    data["bb_upper"] = data["bb_mid"] + (data["bb_std"] * 2.0)
+    data["bb_lower"] = data["bb_mid"] - (data["bb_std"] * 2.0)
+    data["macd"], data["macd_signal"], data["macd_hist"] = _macd(data["close"], 12, 26, 9)
+    data["stoch_k"], data["stoch_d"] = _stoch(data, 14, 3, 3)
+    data["obv"] = _obv(data["close"], data["volume"])
+    data["log_return"] = np.log(data["close"] / data["close"].shift(1))
+    data["volatility_20"] = data["log_return"].rolling(20, min_periods=20).std() * np.sqrt(20.0)
     data["reg_basis"] = _rolling_linreg_endpoint((data["high"] + data["low"]) / 2.0, cfg.snr_length)
     data["reg_slope"] = data["reg_basis"] - data["reg_basis"].shift(5)
     data["stdev"] = ((data["high"] + data["low"]) / 2.0).rolling(cfg.snr_length, min_periods=cfg.snr_length).std()
@@ -573,6 +628,21 @@ def default_feature_columns() -> list[str]:
         "active_kz",
         "atr14",
         "rsi",
+        "ema20",
+        "ema50",
+        "ema200",
+        "vwap_d",
+        "bb_mid",
+        "bb_upper",
+        "bb_lower",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "stoch_k",
+        "stoch_d",
+        "obv",
+        "log_return",
+        "volatility_20",
         "reg_basis",
         "reg_slope",
         "snr_upper",

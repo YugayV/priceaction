@@ -30,6 +30,11 @@ ENV/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Env
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 .idea/
