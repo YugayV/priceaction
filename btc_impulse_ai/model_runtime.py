@@ -63,7 +63,7 @@ def train_model_bundle(
     event_prob = event_model.predict_proba(X_test)[:, 1] if len(X_test) > 0 else np.array([])
     event_pred = (event_prob >= 0.5).astype(int) if len(event_prob) > 0 else np.array([])
 
-    direction_df = feature_df.join(feature_df[[direction_target_column, "large_down_move"]], how="left")
+    direction_df = feature_df.copy()
     direction_df = direction_df.loc[
         (direction_df[direction_target_column] == 1) | (direction_df["large_down_move"] == 1)
     ].copy()
