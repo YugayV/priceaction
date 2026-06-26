@@ -97,12 +97,12 @@ def _recommendation(df_row: pd.Series, probs: dict, horizon_bars: int, threshold
     long_bias = (
         int(df_row.get("trend_bull", 0)) == 1
         and int(df_row.get("flow_is_bull", 0)) == 1
-        and float(df_row.get("kz_long_score", 0.0)) >= float(df_row.get("kz_short_score", 0.0))
+        and float(df_row.get("ict_long_score", df_row.get("kz_long_score", 0.0))) >= float(df_row.get("ict_short_score", df_row.get("kz_short_score", 0.0)))
     )
     short_bias = (
         int(df_row.get("trend_bear", 0)) == 1
         and int(df_row.get("flow_is_bull", 1)) == 0
-        and float(df_row.get("kz_short_score", 0.0)) >= float(df_row.get("kz_long_score", 0.0))
+        and float(df_row.get("ict_short_score", df_row.get("kz_short_score", 0.0))) >= float(df_row.get("ict_long_score", df_row.get("kz_long_score", 0.0)))
     )
 
     direction = "NEUTRAL"
@@ -146,7 +146,32 @@ def _recommendation(df_row: pd.Series, probs: dict, horizon_bars: int, threshold
         "timestamp": str(df_row.name),
     }
 
-def _build_dashboard_figure(df: pd.DataFrame, show_snr: bool, show_ema: bool, show_bb: bool, show_vwap: bool, show_signals: bool) -> go.Figure:
+def _mask_windows(index: pd.Index, mask: pd.Series) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    active_start = None
+    prev_idx = None
+    for ts, active in pd.Series(mask.astype(bool), index=index).items():
+        if active and active_start is None:
+            active_start = ts
+        elif (not active) and active_start is not None and prev_idx is not None:
+            windows.append((active_start, prev_idx))
+            active_start = None
+        prev_idx = ts
+    if active_start is not None and prev_idx is not None:
+        windows.append((active_start, prev_idx))
+    return windows
+
+
+def _build_dashboard_figure(
+    df: pd.DataFrame,
+    show_snr: bool,
+    show_ema: bool,
+    show_bb: bool,
+    show_vwap: bool,
+    show_signals: bool,
+    show_sessions: bool,
+    show_silver: bool,
+) -> go.Figure:
     fig = make_subplots(
         rows=5,
         cols=1,
@@ -190,10 +215,25 @@ def _build_dashboard_figure(df: pd.DataFrame, show_snr: bool, show_ema: bool, sh
     if show_signals:
         bull_idx = df.index[df["bull_sweep"] == 1] if "bull_sweep" in df.columns else df.index[:0]
         bear_idx = df.index[df["bear_sweep"] == 1] if "bear_sweep" in df.columns else df.index[:0]
+        sb_long_idx = df.index[df["silver_bullet_long"] == 1] if "silver_bullet_long" in df.columns else df.index[:0]
+        sb_short_idx = df.index[df["silver_bullet_short"] == 1] if "silver_bullet_short" in df.columns else df.index[:0]
         if len(bull_idx) > 0:
             fig.add_trace(go.Scatter(x=bull_idx, y=df.loc[bull_idx, "close"], mode="markers", name="Bull Sweep", marker=dict(size=8, color="#06d6a0")), row=1, col=1)
         if len(bear_idx) > 0:
             fig.add_trace(go.Scatter(x=bear_idx, y=df.loc[bear_idx, "close"], mode="markers", name="Bear Sweep", marker=dict(size=8, color="#ef476f")), row=1, col=1)
+        if len(sb_long_idx) > 0:
+            fig.add_trace(go.Scatter(x=sb_long_idx, y=df.loc[sb_long_idx, "low"], mode="markers", name="Silver Bullet Long", marker=dict(size=10, color="#ffd166", symbol="triangle-up")), row=1, col=1)
+        if len(sb_short_idx) > 0:
+            fig.add_trace(go.Scatter(x=sb_short_idx, y=df.loc[sb_short_idx, "high"], mode="markers", name="Silver Bullet Short", marker=dict(size=10, color="#ff7b00", symbol="triangle-down")), row=1, col=1)
+
+    if show_sessions:
+        for x0, x1 in _mask_windows(df.index, df["is_london_kz"] if "is_london_kz" in df.columns else pd.Series(0, index=df.index)):
+            fig.add_vrect(x0=x0, x1=x1, fillcolor="#118ab2", opacity=0.08, line_width=0, row=1, col=1)
+        for x0, x1 in _mask_windows(df.index, df["is_ny_kz"] if "is_ny_kz" in df.columns else pd.Series(0, index=df.index)):
+            fig.add_vrect(x0=x0, x1=x1, fillcolor="#ef476f", opacity=0.08, line_width=0, row=1, col=1)
+    if show_silver:
+        for x0, x1 in _mask_windows(df.index, df["is_silver"] if "is_silver" in df.columns else pd.Series(0, index=df.index)):
+            fig.add_vrect(x0=x0, x1=x1, fillcolor="#ffd166", opacity=0.12, line_width=0, row=1, col=1)
 
     fig.add_trace(go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color="#3a86ff"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["rsi"], mode="lines", name="RSI", line=dict(color="#ff006e", width=1.5)), row=3, col=1)
@@ -260,8 +300,9 @@ try:
     st.markdown("---")
     
     # Main Tabs
-    main_tab1, main_tab2, main_tab3, main_tab4, main_tab5, main_tab6 = st.tabs([
+    main_tab1, main_tab2, main_tab3, main_tab4, main_tab5, main_tab6, main_tab7 = st.tabs([
         "📈 Графики",
+        "🕒 ICT Sessions",
         "📟 Индикаторы",
         "🧠 ML",
         "📰 Новости",
@@ -277,12 +318,71 @@ try:
         show_bb = st.checkbox("Bollinger Bands", value=False)
         show_vwap = st.checkbox("VWAP (Daily)", value=True)
         show_signals = st.checkbox("PA сигналы (sweep)", value=True)
+        show_sessions = st.checkbox("ICT session zones", value=True)
+        show_silver = st.checkbox("Silver Bullet zones", value=True)
 
         chart_df = df_features.dropna(subset=["open", "high", "low", "close"]).tail(1200).copy()
-        fig = _build_dashboard_figure(chart_df, show_snr=show_snr, show_ema=show_ema, show_bb=show_bb, show_vwap=show_vwap, show_signals=show_signals)
+        fig = _build_dashboard_figure(
+            chart_df,
+            show_snr=show_snr,
+            show_ema=show_ema,
+            show_bb=show_bb,
+            show_vwap=show_vwap,
+            show_signals=show_signals,
+            show_sessions=show_sessions,
+            show_silver=show_silver,
+        )
         st.plotly_chart(fig, use_container_width=True)
 
     with main_tab2:
+        st.subheader("ICT Sessions, Kill Zones и Silver Bullet")
+        last = df_features.dropna().iloc[-1]
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.metric("London KZ bars", f"{int(df_features['is_london_kz'].sum())}")
+        with s2:
+            st.metric("NY KZ bars", f"{int(df_features['is_ny_kz'].sum())}")
+        with s3:
+            st.metric("Silver Bullet bars", f"{int(df_features['is_silver'].sum())}")
+        with s4:
+            st.metric("ICT Bias", "LONG" if float(last.get("ict_long_score", 0.0)) >= float(last.get("ict_short_score", 0.0)) else "SHORT")
+
+        session_stats = pd.DataFrame(
+            [
+                {"session": "Asia", "large_move_rate": float(df_features.loc[df_features["is_asia"] == 1, "large_move"].mean() * 100.0)},
+                {"session": "London", "large_move_rate": float(df_features.loc[df_features["is_london"] == 1, "large_move"].mean() * 100.0)},
+                {"session": "New York", "large_move_rate": float(df_features.loc[df_features["is_ny"] == 1, "large_move"].mean() * 100.0)},
+                {"session": "London SB", "large_move_rate": float(df_features.loc[df_features["is_london_sb"] == 1, "large_move"].mean() * 100.0)},
+                {"session": "NY AM SB", "large_move_rate": float(df_features.loc[df_features["is_ny_am_sb"] == 1, "large_move"].mean() * 100.0)},
+                {"session": "NY PM SB", "large_move_rate": float(df_features.loc[df_features["is_ny_pm_sb"] == 1, "large_move"].mean() * 100.0)},
+            ]
+        ).fillna(0.0)
+        fig_sessions = px.bar(session_stats, x="session", y="large_move_rate", color="session", template="plotly_dark", title="Move Rate по ICT-сессиям")
+        st.plotly_chart(fig_sessions, use_container_width=True)
+
+        st.markdown("### Текущие ICT уровни")
+        st.json(
+            {
+                "previous_day_high": float(last.get("previous_day_high", np.nan)),
+                "previous_day_low": float(last.get("previous_day_low", np.nan)),
+                "asia_session_high": float(last.get("asia_session_high", np.nan)),
+                "asia_session_low": float(last.get("asia_session_low", np.nan)),
+                "london_open_high": float(last.get("london_open_high", np.nan)),
+                "london_open_low": float(last.get("london_open_low", np.nan)),
+                "ny_open_high": float(last.get("ny_open_high", np.nan)),
+                "ny_open_low": float(last.get("ny_open_low", np.nan)),
+            }
+        )
+
+        ict_cols = [
+            "is_asia", "is_london", "is_ny", "is_london_kz", "is_ny_kz", "is_london_sb", "is_ny_am_sb", "is_ny_pm_sb",
+            "pdh_sweep", "pdl_sweep", "asia_high_sweep", "asia_low_sweep", "displacement_bull", "displacement_bear",
+            "silver_bullet_long", "silver_bullet_short", "ict_long_score", "ict_short_score"
+        ]
+        ict_cols = [c for c in ict_cols if c in df_features.columns]
+        st.dataframe(df_features[ict_cols].tail(40), use_container_width=True)
+
+    with main_tab3:
         st.subheader("Таблица индикаторов (последние 50 свечей)")
         show_cols = [
             "open",
@@ -307,15 +407,25 @@ try:
             "flow_main",
             "kz_long_score",
             "kz_short_score",
+            "ict_long_score",
+            "ict_short_score",
             "bull_choch",
             "bear_choch",
             "bull_sweep",
             "bear_sweep",
+            "pdh_sweep",
+            "pdl_sweep",
+            "asia_high_sweep",
+            "asia_low_sweep",
+            "displacement_bull",
+            "displacement_bear",
+            "silver_bullet_long",
+            "silver_bullet_short",
         ]
         existing_cols = [c for c in show_cols if c in df_features.columns]
         st.dataframe(df_features[existing_cols].tail(50), use_container_width=True)
 
-    with main_tab3:
+    with main_tab4:
         st.subheader("Машинное обучение: вероятность импульса и направление")
 
         if train_models or ("model_bundle" not in st.session_state):
@@ -355,7 +465,7 @@ try:
         else:
             st.info("Нажми Train ML models в сайдбаре.")
     
-    with main_tab4:
+    with main_tab5:
         if enable_news:
             st.subheader("Latest Market News")
             news_data = get_news(asset_key)
@@ -376,7 +486,7 @@ try:
         else:
             st.info("News analysis is disabled. Enable it in the sidebar.")
 
-    with main_tab5:
+    with main_tab6:
         if enable_deepseek:
             st.subheader("🤖 DeepSeek AI Analysis")
             if st.button("Generate Analysis"):
@@ -403,7 +513,7 @@ try:
         else:
             st.info("DeepSeek выключен. Включи в сайдбаре и добавь ключ в переменные окружения.")
 
-    with main_tab6:
+    with main_tab7:
         st.subheader("📤 Export for TradingView")
 
         bundle = st.session_state.get("model_bundle")

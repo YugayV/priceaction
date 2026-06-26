@@ -358,16 +358,46 @@ def _session_mask(index: pd.DatetimeIndex, start_hhmm: str, end_hhmm: str) -> pd
     return pd.Series(mask.astype(int), index=index)
 
 
+def _session_date_key(index: pd.DatetimeIndex) -> pd.Index:
+    return pd.Index(index.date, name="session_date")
+
+
+def _group_session_level(series: pd.Series, date_key: pd.Index, mask: pd.Series, agg: str) -> pd.Series:
+    masked = series.where(mask.astype(bool))
+    return masked.groupby(date_key).transform(agg)
+
+
+def _previous_daily_level(series: pd.Series, date_key: pd.Index, agg: str) -> pd.Series:
+    grouped = series.groupby(date_key).agg(agg)
+    previous = grouped.shift(1)
+    return pd.Series(date_key.map(previous), index=series.index, dtype=float)
+
+
 def add_session_features(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     idx = data.index
+    date_key = _session_date_key(idx)
     data["is_asia"] = _session_mask(idx, "0000", "0900")
     data["is_london"] = _session_mask(idx, "1600", "0100")
     data["is_ny"] = _session_mask(idx, "2100", "0600")
+    data["is_london_open"] = _session_mask(idx, "1600", "1700")
+    data["is_ny_open"] = _session_mask(idx, "2130", "2230")
     data["is_london_kz"] = _session_mask(idx, "1600", "1900")
     data["is_ny_kz"] = _session_mask(idx, "2100", "0000")
-    data["is_silver"] = _session_mask(idx, "2300", "0000")
+    data["is_london_sb"] = _session_mask(idx, "1700", "1800")
+    data["is_ny_am_sb"] = _session_mask(idx, "2300", "0000")
+    data["is_ny_pm_sb"] = _session_mask(idx, "0300", "0400")
+    data["is_silver"] = ((data["is_london_sb"] + data["is_ny_am_sb"] + data["is_ny_pm_sb"]) > 0).astype(int)
     data["active_kz"] = ((data["is_london_kz"] + data["is_ny_kz"] + data["is_silver"]) > 0).astype(int)
+    data["asia_session_high"] = _group_session_level(data["high"], date_key, data["is_asia"], "max")
+    data["asia_session_low"] = _group_session_level(data["low"], date_key, data["is_asia"], "min")
+    data["london_open_high"] = _group_session_level(data["high"], date_key, data["is_london_open"], "max")
+    data["london_open_low"] = _group_session_level(data["low"], date_key, data["is_london_open"], "min")
+    data["ny_open_high"] = _group_session_level(data["high"], date_key, data["is_ny_open"], "max")
+    data["ny_open_low"] = _group_session_level(data["low"], date_key, data["is_ny_open"], "min")
+    data["previous_day_high"] = _previous_daily_level(data["high"], date_key, "max")
+    data["previous_day_low"] = _previous_daily_level(data["low"], date_key, "min")
+    data["daily_open"] = data["open"].groupby(date_key).transform("first")
     data["hour"] = idx.hour
     data["day_of_week"] = idx.dayofweek
     data["is_weekend"] = (idx.dayofweek >= 5).astype(int)
@@ -426,6 +456,26 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
     data["bear_break"] = (data["close"] < prior_low).astype(int)
     data["bull_sweep"] = ((data["low"] < prior_low) & (data["close"] > prior_low)).astype(int)
     data["bear_sweep"] = ((data["high"] > prior_high) & (data["close"] < prior_high)).astype(int)
+    data["pdh_sweep"] = (
+        data["previous_day_high"].notna()
+        & (data["high"] > data["previous_day_high"])
+        & (data["close"] < data["previous_day_high"])
+    ).astype(int)
+    data["pdl_sweep"] = (
+        data["previous_day_low"].notna()
+        & (data["low"] < data["previous_day_low"])
+        & (data["close"] > data["previous_day_low"])
+    ).astype(int)
+    data["asia_high_sweep"] = (
+        data["asia_session_high"].notna()
+        & (data["high"] > data["asia_session_high"])
+        & (data["close"] < data["asia_session_high"])
+    ).astype(int)
+    data["asia_low_sweep"] = (
+        data["asia_session_low"].notna()
+        & (data["low"] < data["asia_session_low"])
+        & (data["close"] > data["asia_session_low"])
+    ).astype(int)
 
     structure_dir = np.where(data["bull_break"] == 1, 1, np.where(data["bear_break"] == 1, -1, np.nan))
     data["structure_dir"] = pd.Series(structure_dir, index=data.index).ffill().fillna(0)
@@ -462,8 +512,21 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
     data["candle_body"] = (data["close"] - data["open"]).abs()
     data["upper_wick"] = data["high"] - data[["close", "open"]].max(axis=1)
     data["lower_wick"] = data[["close", "open"]].min(axis=1) - data["low"]
+    data["body_to_range"] = (data["candle_body"] / data["bar_range"]).replace([np.inf, -np.inf], np.nan)
     data["trend_bull"] = ((data["structure_dir"] == 1) | (data["reg_slope"] > 0)).astype(int)
     data["trend_bear"] = ((data["structure_dir"] == -1) | (data["reg_slope"] < 0)).astype(int)
+    data["displacement_bull"] = (
+        (data["close"] > data["open"])
+        & (data["candle_body"] >= data["atr14"] * 0.8)
+        & (data["body_to_range"] >= 0.6)
+        & ((data["close"] > data["high"].shift(1)) | (data["bull_fvg"] == 1))
+    ).astype(int)
+    data["displacement_bear"] = (
+        (data["close"] < data["open"])
+        & (data["candle_body"] >= data["atr14"] * 0.8)
+        & (data["body_to_range"] >= 0.6)
+        & ((data["close"] < data["low"].shift(1)) | (data["bear_fvg"] == 1))
+    ).astype(int)
 
     touch_buffer = data["atr14"] * cfg.snr_touch_atr
     data["snr_long_touch"] = (
@@ -522,7 +585,7 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
         & (data["trend_bull"] == 1)
         & (data["close"] > data["open"])
         & (data["close"] > data["high"].shift(1))
-        & ((data["candle_body"] / data["bar_range"]) > 0.55)
+        & (data["body_to_range"] > 0.55)
         & (data["close"] > data["poc_proxy"])
     ).astype(int)
     data["bear_pa_continuation"] = (
@@ -530,8 +593,20 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
         & (data["trend_bear"] == 1)
         & (data["close"] < data["open"])
         & (data["close"] < data["low"].shift(1))
-        & ((data["candle_body"] / data["bar_range"]) > 0.55)
+        & (data["body_to_range"] > 0.55)
         & (data["close"] < data["poc_proxy"])
+    ).astype(int)
+    data["silver_bullet_long"] = (
+        (data["is_silver"] == 1)
+        & ((data["pdl_sweep"] == 1) | (data["asia_low_sweep"] == 1) | (data["bull_sweep"] == 1))
+        & ((data["bull_choch"] == 1) | (data["in_bull_fvg"] == 1) | (data["bull_fvg"] == 1) | (data["snr_long_reclaim"] == 1))
+        & ((data["displacement_bull"] == 1) | (data["flow_is_bull"] == 1))
+    ).astype(int)
+    data["silver_bullet_short"] = (
+        (data["is_silver"] == 1)
+        & ((data["pdh_sweep"] == 1) | (data["asia_high_sweep"] == 1) | (data["bear_sweep"] == 1))
+        & ((data["bear_choch"] == 1) | (data["in_bear_fvg"] == 1) | (data["bear_fvg"] == 1) | (data["snr_short_reject"] == 1))
+        & ((data["displacement_bear"] == 1) | (data["flow_is_bull"] == 0))
     ).astype(int)
 
     data["kz_priority_bonus"] = np.where(data["is_silver"] == 1, 2, 0)
@@ -575,6 +650,22 @@ def add_snr_features(df: pd.DataFrame, config: Optional[FeatureConfig] = None) -
         + data["snr_short_reject"]
         + data["snr_bear_retest"]
         + data["kz_priority_bonus"]
+    )
+    data["ict_long_score"] = (
+        data["kz_long_score"]
+        + data["pdl_sweep"]
+        + data["asia_low_sweep"]
+        + data["displacement_bull"]
+        + data["silver_bullet_long"] * 2
+        + ((data["close"] > data["daily_open"]).fillna(False)).astype(int)
+    )
+    data["ict_short_score"] = (
+        data["kz_short_score"]
+        + data["pdh_sweep"]
+        + data["asia_high_sweep"]
+        + data["displacement_bear"]
+        + data["silver_bullet_short"] * 2
+        + ((data["close"] < data["daily_open"]).fillna(False)).astype(int)
     )
 
     data = data.replace([np.inf, -np.inf], np.nan)
@@ -623,10 +714,24 @@ def default_feature_columns() -> list[str]:
         "is_asia",
         "is_london",
         "is_ny",
+        "is_london_open",
+        "is_ny_open",
         "is_london_kz",
         "is_ny_kz",
+        "is_london_sb",
+        "is_ny_am_sb",
+        "is_ny_pm_sb",
         "is_silver",
         "active_kz",
+        "asia_session_high",
+        "asia_session_low",
+        "london_open_high",
+        "london_open_low",
+        "ny_open_high",
+        "ny_open_low",
+        "previous_day_high",
+        "previous_day_low",
+        "daily_open",
         "atr14",
         "rsi",
         "ema20",
@@ -662,10 +767,16 @@ def default_feature_columns() -> list[str]:
         "bear_choch",
         "bull_sweep",
         "bear_sweep",
+        "pdh_sweep",
+        "pdl_sweep",
+        "asia_high_sweep",
+        "asia_low_sweep",
         "bull_fvg",
         "bear_fvg",
         "in_bull_fvg",
         "in_bear_fvg",
+        "displacement_bull",
+        "displacement_bear",
         "snr_long_reclaim",
         "snr_short_reject",
         "snr_bull_breakout",
@@ -676,8 +787,12 @@ def default_feature_columns() -> list[str]:
         "bear_pa_rejection",
         "bull_pa_continuation",
         "bear_pa_continuation",
+        "silver_bullet_long",
+        "silver_bullet_short",
         "kz_long_score",
         "kz_short_score",
+        "ict_long_score",
+        "ict_short_score",
     ]
 
 
@@ -702,14 +817,24 @@ def latest_signal_snapshot(df: pd.DataFrame) -> dict:
         "poc_proxy": float(last["poc_proxy"]),
         "active_kz": int(last["active_kz"]),
         "is_silver": int(last["is_silver"]),
+        "silver_bullet_long": int(last["silver_bullet_long"]),
+        "silver_bullet_short": int(last["silver_bullet_short"]),
         "bull_choch": int(last["bull_choch"]),
         "bear_choch": int(last["bear_choch"]),
         "in_bull_fvg": int(last["in_bull_fvg"]),
         "in_bear_fvg": int(last["in_bear_fvg"]),
+        "pdh_sweep": int(last["pdh_sweep"]),
+        "pdl_sweep": int(last["pdl_sweep"]),
+        "asia_high_sweep": int(last["asia_high_sweep"]),
+        "asia_low_sweep": int(last["asia_low_sweep"]),
+        "displacement_bull": int(last["displacement_bull"]),
+        "displacement_bear": int(last["displacement_bear"]),
         "snr_long_reclaim": int(last["snr_long_reclaim"]),
         "snr_short_reject": int(last["snr_short_reject"]),
         "snr_bull_retest": int(last["snr_bull_retest"]),
         "snr_bear_retest": int(last["snr_bear_retest"]),
         "kz_long_score": float(last["kz_long_score"]),
         "kz_short_score": float(last["kz_short_score"]),
+        "ict_long_score": float(last["ict_long_score"]),
+        "ict_short_score": float(last["ict_short_score"]),
     }
