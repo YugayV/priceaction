@@ -308,6 +308,7 @@ def _vwap_daily(df: pd.DataFrame) -> pd.Series:
 def _rsi(close: pd.Series, length: int) -> pd.Series:
     delta = close.diff()
     up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
     avg_up = up.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
     avg_down = down.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
     rs = avg_up / avg_down.replace(0, np.nan)
