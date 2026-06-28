@@ -489,6 +489,32 @@ try:
     with main_tab6:
         if enable_deepseek:
             st.subheader("🤖 DeepSeek AI Analysis")
+            deepseek = DeepSeekAnalyzer()
+            status = deepseek.get_status()
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Режим", status["mode"].upper())
+            with c2:
+                st.metric("Модель", status["model"])
+            with c3:
+                st.metric("Статус", "ONLINE" if status["ok"] else "FALLBACK")
+
+            if status["ok"]:
+                st.success(status["message"])
+            else:
+                st.warning(status["message"])
+
+            with st.expander("API Details"):
+                st.json(status)
+
+            if st.button("Test DeepSeek connection"):
+                with st.spinner("Проверяю соединение с DeepSeek..."):
+                    test_result = deepseek.test_connection()
+                    if test_result["ok"]:
+                        st.success(test_result["message"])
+                    else:
+                        st.warning(test_result["message"])
+
             if st.button("Generate Analysis"):
                 with st.spinner("Analyzing market with DeepSeek AI..."):
                     try:
@@ -504,7 +530,6 @@ try:
                         }
 
                         news_data = get_news(asset_key) if enable_news else []
-                        deepseek = DeepSeekAnalyzer()
                         analysis = deepseek.analyze_market(asset_key, price_data, news_data)
                         st.markdown(analysis)
                     except Exception as e:

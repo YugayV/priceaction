@@ -209,10 +209,32 @@ def _load_yfinance_data(
     raw = yf.download(symbol, **download_kwargs)
     if raw.empty:
         raise ValueError("No market data returned from yfinance.")
-    raw = raw.rename(columns=str.lower)
+    if isinstance(raw.columns, pd.MultiIndex):
+        normalized_columns: list[str] = []
+        for col in raw.columns:
+            parts = [str(part).strip().lower() for part in col if str(part).strip()]
+            match = next((part for part in parts if part in REQUIRED_COLUMNS), parts[0] if parts else "")
+            normalized_columns.append(match)
+        raw.columns = normalized_columns
+    else:
+        raw = raw.rename(columns=lambda col: str(col).strip().lower())
+
+    alias_map = {
+        "adj close": "close",
+        "adjclose": "close",
+    }
+    raw = raw.rename(columns=alias_map)
+    available_cols = [col for col in REQUIRED_COLUMNS if col in raw.columns]
+    if not available_cols:
+        raise ValueError(f"yfinance returned unsupported columns: {list(raw.columns)}")
+    raw = raw.loc[:, ~pd.Index(raw.columns).duplicated(keep="first")].copy()
+    for col in ["open", "high", "low", "close"]:
+        if col not in raw.columns and "close" in raw.columns:
+            raw[col] = raw["close"]
+    if "volume" not in raw.columns:
+        raw["volume"] = 0.0
     raw["volume"] = raw["volume"].fillna(0.0)
-    raw.index = pd.to_datetime(raw.index, utc=True).tz_convert(timezone)
-    return raw
+    return _ensure_datetime_index(raw, timezone)
 
 
 def load_market_data(

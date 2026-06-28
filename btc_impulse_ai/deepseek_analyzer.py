@@ -28,6 +28,51 @@ class DeepSeekAnalyzer:
                 max_retries=1,
             )
 
+    def get_status(self) -> Dict:
+        if not self.api_key:
+            return {
+                "mode": "fallback",
+                "ok": False,
+                "message": "DEEPSEEK_API_KEY не задан",
+                "model": self.model,
+                "base_url": self.config["deepseek"]["api_base"],
+            }
+        return {
+            "mode": "online",
+            "ok": True,
+            "message": "Ключ найден, API готов к вызову",
+            "model": self.model,
+            "base_url": self.config["deepseek"]["api_base"],
+        }
+
+    def test_connection(self) -> Dict:
+        status = self.get_status()
+        if not status["ok"] or self.client is None:
+            return status
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply with OK"}],
+                temperature=0.0,
+                max_tokens=5,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            return {
+                "mode": "online",
+                "ok": True,
+                "message": f"Подключение успешно: {text or 'OK'}",
+                "model": self.model,
+                "base_url": self.config["deepseek"]["api_base"],
+            }
+        except Exception as e:
+            return {
+                "mode": "fallback",
+                "ok": False,
+                "message": f"Connection error: {e}",
+                "model": self.model,
+                "base_url": self.config["deepseek"]["api_base"],
+            }
+
     def _local_fallback_analysis(self, asset_key: str, price_data: Dict, news_data: List[Dict], error_text: str | None = None) -> str:
         asset = self.assets[asset_key]
         latest_close = float(price_data.get("latest_close", 0.0) or 0.0)
